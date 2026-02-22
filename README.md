@@ -107,6 +107,17 @@ Access the dashboard:
 
 ---
 
+## 📚 Documentation & Detailed Guides
+
+For in-depth technical documentation, please refer to the documents in [`docs/`](docs/):
+
+- 🏛️ [**System Architecture & Pipeline Flow**](docs/ARCHITECTURE.md): WebRTC dataflow, DeepStream GStreamer plugins, and cross-camera Re-ID fusion algorithms.
+- 🚀 [**Deployment & Setup Guide**](docs/DEPLOYMENT.md): Hardware requirements, Docker Compose setup, NVIDIA Jetson/dGPU configuration, and port allocations.
+- 📡 [**REST API & WebSocket Specification**](docs/API.md): Endpoints, JSON payloads, ROI configurations, and real-time WebSocket event feeds.
+
+---
+
 ## 📄 License
 
 Distributed under the MIT License. See `LICENSE` for more information.
+
