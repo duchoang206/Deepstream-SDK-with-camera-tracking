@@ -14,7 +14,7 @@ class CameraCalibrator:
         # cam_id -> Calibration points {"src_points": [[x,y]...], "dst_points": [[x,y]...]}
         self.configs: Dict[str, dict] = {}
 
-    def set_calibration(self, cam_id: str, src_points: List[List[float]], dst_points: List[List[float]]) -> bool:
+    def set_calibration(self, cam_id: str, src_points: List[List[float]], dst_points: List[List[float]], cam_x: float = None, cam_y: float = None, cam_z: float = None, yaw: float = None) -> bool:
         """
         Compute and store the 3x3 Homography Matrix from at least 4 corresponding points.
         src_points: 4 points in camera normalized coords [[x0,y0], [x1,y1], [x2,y2], [x3,y3]]
@@ -31,10 +31,27 @@ class CameraCalibrator:
             H = self._compute_homography_dlt(src_pts, dst_pts)
             if H is not None:
                 self.homographies[cam_id] = H
+                
+                # Calculate FOV polygon by projecting the 4 corners of the video frame
+                frame_corners = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]
+                fov_polygon = []
+                for cx, cy in frame_corners:
+                    pt = np.array([cx, cy, 1.0], dtype=np.float32)
+                    floor_pt = np.dot(H, pt)
+                    if abs(floor_pt[2]) > 1e-7:
+                        fov_polygon.append([float(floor_pt[0] / floor_pt[2]), float(floor_pt[1] / floor_pt[2])])
+                    else:
+                        fov_polygon.append([cx, cy])
+                
                 self.configs[cam_id] = {
                     "src_points": src_points,
                     "dst_points": dst_points,
-                    "matrix": H.tolist()
+                    "matrix": H.tolist(),
+                    "cam_x": cam_x,
+                    "cam_y": cam_y,
+                    "cam_z": cam_z,
+                    "yaw": yaw,
+                    "fov_polygon": fov_polygon
                 }
                 return True
         except Exception as e:
@@ -81,9 +98,9 @@ class CameraCalibrator:
         else:
             fx, fy = x, y
             
-        # Clamp to floor boundaries [0..1]
-        fx = max(0.0, min(1.0, fx))
-        fy = max(0.0, min(1.0, fy))
+        # Clamp to non-negative coordinates
+        fx = max(0.0, fx)
+        fy = max(0.0, fy)
         return (round(fx, 4), round(fy, 4))
 
     def get_config(self, cam_id: str) -> Optional[dict]:
@@ -94,8 +111,12 @@ class CameraCalibrator:
             cam_id = r.get("cam_id")
             src = r.get("src_points")
             dst = r.get("dst_points")
+            cam_x = r.get("cam_x")
+            cam_y = r.get("cam_y")
+            cam_z = r.get("cam_z")
+            yaw = r.get("yaw")
             if cam_id and src and dst:
-                self.set_calibration(cam_id, src, dst)
+                self.set_calibration(cam_id, src, dst, cam_x, cam_y, cam_z, yaw)
 
 # Global singleton
 camera_calibrator = CameraCalibrator()

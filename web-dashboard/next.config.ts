@@ -5,12 +5,12 @@ const nextConfig: NextConfig = {
     return [
       {
         source: '/api/backend/:path*',
-        destination: 'http://localhost:8000/api/:path*' // Proxy to Python backend
+        destination: 'http://127.0.0.1:8000/api/:path*' // Proxy to Python backend
       }
     ]
   },
   // @ts-ignore
-  allowedDevOrigins: ['192.168.1.6', '192.168.53.77', '192.168.5.107', 'localhost', '127.0.0.1']
+  allowedDevOrigins: ['192.168.1.6', '192.168.53.77', '192.168.5.107', '192.168.5.103', 'localhost', '127.0.0.1']
 };
 
 export default nextConfig;

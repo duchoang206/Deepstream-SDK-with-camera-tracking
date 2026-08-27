@@ -1,4 +1,6 @@
 import os
+os.environ["GIO_USE_PROXY"] = "dummy"
+os.environ["GIO_USE_VFS"] = "local"
 import sys
 import time
 import threading
@@ -116,17 +118,35 @@ class DeepStreamManager:
             self.pipeline = None  # Ensure None so add_source no-ops safely
 
 
-    def _build_pipeline(self):
+    def _build_pipeline(self, tracker_config_path: str = "/app/models_config/dstest2_tracker_config.txt"):
+        # 1. Dynamically determine batch size based on the number of initial sources
+        # We need a minimum of 1.
+        num_cameras = max(1, len(self.sources))
+        
+        # 2. Update config_infer_primary.txt dynamically to match the number of cameras
+        try:
+            config_path = "/app/models_config/config_infer_primary.txt"
+            with open(config_path, "r") as f:
+                config_content = f.read()
+            import re
+            # Replace batch-size=... in the [property] section
+            config_content = re.sub(r'batch-size=\d+', f'batch-size={num_cameras}', config_content, count=1)
+            with open(config_path, "w") as f:
+                f.write(config_content)
+            print(f"[DeepStreamManager] Dynamically set nvinfer batch-size to {num_cameras}", flush=True)
+        except Exception as e:
+            print(f"[DeepStreamManager] Failed to update nvinfer config batch-size: {e}", flush=True)
+
         self.pipeline = Gst.Pipeline(name="rtc-vms-pipeline")
 
         # 1. nvstreammux - batch up to 32 streams
         self.muxer = Gst.ElementFactory.make("nvstreammux", "unified-muxer")
         if not self.muxer:
             raise RuntimeError("[DeepStreamManager] Failed to create nvstreammux - DeepStream plugin missing")
-        self.muxer.set_property("batch-size", 32)
+        self.muxer.set_property("batch-size", num_cameras)
         self.muxer.set_property("width", 1280)
         self.muxer.set_property("height", 720)
-        self.muxer.set_property("batched-push-timeout", 40000)
+        self.muxer.set_property("batched-push-timeout", 400000)
         self.muxer.set_property("live-source", 1)
         self.pipeline.add(self.muxer)
 
@@ -144,7 +164,7 @@ class DeepStreamManager:
         self.tracker = Gst.ElementFactory.make("nvtracker", "nvtracker-engine")
         if not self.tracker:
             raise RuntimeError("[DeepStreamManager] Failed to create nvtracker")
-        tracker_config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "models_config", "tracker_config.yml")
+        tracker_config_path = "/opt/nvidia/deepstream/deepstream/samples/configs/deepstream-app/config_tracker_NvDCF_perf.yml"
         tracker_lib = "/opt/nvidia/deepstream/deepstream/lib/libnvds_nvmultiobjecttracker.so"
         if not os.path.exists(tracker_lib):
             raise RuntimeError(f"[DeepStreamManager] nvtracker lib not found: {tracker_lib}")
@@ -184,10 +204,29 @@ class DeepStreamManager:
     def _bus_call(self, bus, message):
         t = message.type
         if t == Gst.MessageType.EOS:
-            print("[DeepStreamManager] End-of-stream reached")
+            print("[DeepStreamManager] End-of-stream reached", flush=True)
         elif t == Gst.MessageType.ERROR:
             err, debug = message.parse_error()
-            print(f"[DeepStreamManager] Pipeline Error: {err}: {debug}")
+            print(f"[DeepStreamManager] Pipeline Error: {err}: {debug}", flush=True)
+            
+            # Isolate the source of the error to prevent full pipeline abort
+            src_element = message.src
+            if src_element:
+                name = src_element.get_name()
+                print(f"[DeepStreamManager] Error originated from element: {name}", flush=True)
+                if name.startswith("uri-decode-bin-"):
+                    source_id_str = name.replace("uri-decode-bin-", "")
+                    try:
+                        source_id = int(source_id_str)
+                        cam_id = self.source_id_to_cam_id.get(source_id)
+                        if cam_id:
+                            print(f"[DeepStreamManager] Isolating and removing faulty source {cam_id}...", flush=True)
+                            GLib.idle_add(self._delete_source_glib, cam_id, source_id)
+                    except ValueError:
+                        pass
+        elif t == Gst.MessageType.WARNING:
+            err, debug = message.parse_warning()
+            print(f"[DeepStreamManager] Pipeline Warning: {err}: {debug}", flush=True)
         return True
 
     def _run_loop(self):
@@ -197,15 +236,11 @@ class DeepStreamManager:
             bus = self.pipeline.get_bus()
             bus.add_watch(GLib.PRIORITY_DEFAULT, self._bus_call_context)
 
-            if self.sources:
-                # Sources were pre-loaded before loop: go straight to PLAYING
-                ret = self.pipeline.set_state(Gst.State.PLAYING)
-                self._is_playing = True
-                print(f"[DeepStreamManager] Pipeline set_state(PLAYING) with {len(self.sources)} sources, ret={ret}", flush=True)
-            else:
-                # No initial sources: start PAUSED, wait for first dynamic add
-                ret = self.pipeline.set_state(Gst.State.PAUSED)
-                print(f"[DeepStreamManager] Pipeline set_state(PAUSED) - no initial sources, ret={ret}", flush=True)
+            ret = self.pipeline.set_state(Gst.State.PAUSED)
+            print(f"[DeepStreamManager] Pipeline set_state(PAUSED), ret={ret}", flush=True)
+            play_ret = self.pipeline.set_state(Gst.State.PLAYING)
+            print(f"[DeepStreamManager] Pipeline set_state(PLAYING), ret={play_ret}", flush=True)
+            self._is_playing = True
 
             self.is_running = True
             self.loop.run()
@@ -274,10 +309,10 @@ class DeepStreamManager:
             source_id = self.next_source_id
             self.next_source_id += 1
 
-            if hasattr(self, 'context') and self.context and self._is_playing:
-                self.context.invoke_full(GLib.PRIORITY_DEFAULT, self._add_source_glib, cam_id, clean_url, source_id)
+            if hasattr(self, 'context') and self.context:
+                GLib.idle_add(self._add_source_glib, cam_id, clean_url, source_id)
             else:
-                # Pipeline not yet playing: add statically
+                # Pipeline not yet initialized: add statically
                 self._add_source_static(cam_id, clean_url)
             return True
 
@@ -356,7 +391,7 @@ class DeepStreamManager:
                 
             source_id = self.cam_id_to_source_id[cam_id]
             if hasattr(self, 'context') and self.context:
-                self.context.invoke_full(GLib.PRIORITY_DEFAULT, self._delete_source_glib, cam_id, source_id)
+                GLib.idle_add(self._delete_source_glib, cam_id, source_id)
             else:
                 self._delete_source_glib(cam_id, source_id)
             return True
@@ -406,12 +441,11 @@ class DeepStreamManager:
                 source_id = frame_meta.source_id
                 cam_id = self.source_id_to_cam_id.get(source_id, f"cam_{source_id}")
 
-                # Safe frame dimension: use muxer output size as fallback
-                frame_w = frame_meta.source_frame_width
-                frame_h = frame_meta.source_frame_height
-                if frame_w == 0 or frame_h == 0:
-                    frame_w = 1280
-                    frame_h = 720
+                # DeepStream nvinfer rect_params are in muxer resolution (1280x720)
+                frame_w = 1280
+                frame_h = 720
+                mux_w = 1280.0
+                mux_h = 720.0
 
                 raw_detections = []
                 l_obj = frame_meta.obj_meta_list
@@ -422,37 +456,31 @@ class DeepStreamManager:
                     except StopIteration:
                         break
 
-                    # class_id == 0 is PERSON in COCO/YOLOv8
+                    # Extract class name from label or class_id
                     class_id = obj_meta.class_id
-                    is_person = (class_id == 0)
+                    class_name = obj_meta.obj_label or f"class_{class_id}"
+                    class_name = class_name.lower()
 
-                    # Fallback: check label text if class_id filtering not working
-                    if not is_person:
-                        label = obj_meta.obj_label or ""
-                        is_person = "person" in label.lower()
+                    rect = obj_meta.rect_params
+                    # object_id is 64-bit uint; mask to 32-bit for JS/JSON safety
+                    local_id = int(obj_meta.object_id) & 0xFFFFFFFF
 
-                    if is_person:
-                        rect = obj_meta.rect_params
-                        # object_id is 64-bit uint; mask to 32-bit for JS/JSON safety
-                        local_id = int(obj_meta.object_id) & 0xFFFFFFFF
+                    left   = max(0.0, float(rect.left))
+                    top    = max(0.0, float(rect.top))
+                    width  = max(1.0, float(rect.width))
+                    height = max(1.0, float(rect.height))
 
-                        left   = max(0.0, float(rect.left))
-                        top    = max(0.0, float(rect.top))
-                        width  = max(1.0, float(rect.width))
-                        height = max(1.0, float(rect.height))
-
-                        norm_x = min(1.0, left / frame_w)
-                        norm_y = min(1.0, top / frame_h)
-                        norm_w = min(1.0 - norm_x, width / frame_w)
-                        norm_h = min(1.0 - norm_y, height / frame_h)
-
-                        raw_detections.append({
-                            "local_id": local_id,
-                            "class": "person",
-                            "bbox": [round(norm_x, 4), round(norm_y, 4),
-                                     round(norm_w, 4), round(norm_h, 4)],
-                            "confidence": float(getattr(obj_meta, 'confidence', 0.9))
-                        })
+                    norm_x = min(1.0, max(0.0, left / mux_w))
+                    norm_y = min(1.0, max(0.0, top / mux_h))
+                    norm_w = min(1.0 - norm_x, max(0.0, width / mux_w))
+                    norm_h = min(1.0 - norm_y, max(0.0, height / mux_h))
+                    raw_detections.append({
+                        "local_id": local_id,
+                        "class": class_name,
+                        "bbox": [round(norm_x, 4), round(norm_y, 4),
+                                 round(norm_w, 4), round(norm_h, 4)],
+                        "confidence": float(getattr(obj_meta, 'confidence', 0.9))
+                    })
 
                     try:
                         l_obj = l_obj.next
@@ -461,17 +489,26 @@ class DeepStreamManager:
 
                 # Debug heartbeat every ~5 seconds (approx every 150 frames at 30fps)
                 if not hasattr(self, '_debug_frame_count'):
-                    self._debug_frame_count = 0
-                self._debug_frame_count += 1
-                if self._debug_frame_count % 150 == 0:
-                    print(f"[Probe] cam_id={cam_id} source_id={source_id} "
+                    self._debug_frame_count = {}
+                    self._debug_detect_count = {}
+                cam_key = f"{cam_id}_{source_id}"
+                self._debug_frame_count[cam_key] = self._debug_frame_count.get(cam_key, 0) + 1
+                self._debug_detect_count[cam_key] = self._debug_detect_count.get(cam_key, 0) + len(raw_detections)
+                
+                fc = self._debug_frame_count[cam_key]
+                if fc <= 10 or fc % 30 == 0:
+                    print(f"[Probe] cam={cam_id} src={source_id} "
                           f"frame={frame_w}x{frame_h} "
-                          f"detections={len(raw_detections)} "
-                          f"total_objs={sum(1 for _ in iter(lambda: frame_meta.obj_meta_list, None) if False)}", flush=True)
+                          f"objects_detected={len(raw_detections)} "
+                          f"frame_number={fc}", flush=True)
+                    if fc % 30 == 0:
+                        self._debug_detect_count[cam_key] = 0
+
 
                 # MTMC Fusion & Spatial Mapping
                 objects_list = []
                 tripwire_stats = {}
+                roi_states = []
 
                 if raw_detections:
                     try:
@@ -500,7 +537,7 @@ class DeepStreamManager:
                         objects_list.append({
                             "id": gid,
                             "local_id": d["local_id"],
-                            "class": "person",
+                            "class": d.get("class", "object"),
                             "x": round(d["bbox"][0], 4),
                             "y": round(d["bbox"][1], 4),
                             "w": round(d["bbox"][2], 4),
@@ -510,22 +547,24 @@ class DeepStreamManager:
                             "confidence": round(d.get("confidence", 0.9), 2)
                         })
 
-                    try:
-                        triggered_events, tripwire_stats = behavior_engine.process_frame(cam_id, objects_list)
-                        for ev in triggered_events:
-                            try:
-                                db_manager.log_event(ev)
-                            except Exception:
-                                pass
-                            if self.event_callback:
-                                self.event_callback(ev)
-                    except Exception as be_err:
-                        print(f"[Probe] BehaviorEngine error for {cam_id}: {be_err}", flush=True)
+                # Always process behavior engine to update empty frames
+                try:
+                    triggered_events, tripwire_stats, roi_states = behavior_engine.process_frame(cam_id, objects_list)
+                    for ev in triggered_events:
+                        try:
+                            db_manager.log_event(ev)
+                        except Exception:
+                            pass
+                        if self.event_callback:
+                            self.event_callback(ev)
+                except Exception as be_err:
+                    print(f"[Probe] BehaviorEngine error for {cam_id}: {be_err}", flush=True)
 
                 streams_payload.append({
                     "cam_id": cam_id,
                     "objects": objects_list,
-                    "tripwire_stats": tripwire_stats
+                    "tripwire_stats": tripwire_stats,
+                    "rois": roi_states
                 })
 
                 try:

@@ -2,23 +2,44 @@
 
 import React, { useState, useRef, useEffect } from 'react';
 import { useLanguage } from './LanguageContext';
+import { useAppTheme } from './ThemeContext';
+
+const SunIcon = () => (
+  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <circle cx="12" cy="12" r="4"></circle>
+    <path d="M12 2v2"></path>
+    <path d="M12 20v2"></path>
+    <path d="m4.93 4.93 1.41 1.41"></path>
+    <path d="m17.66 17.66 1.41 1.41"></path>
+    <path d="M2 12h2"></path>
+    <path d="M20 12h2"></path>
+    <path d="m6.34 17.66-1.41 1.41"></path>
+    <path d="m19.07 4.93-1.41 1.41"></path>
+  </svg>
+);
+
+const MoonIcon = () => (
+  <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"></path>
+  </svg>
+);
 
 const BellIcon = () => (
-  <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
     <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path>
     <path d="M13.73 21a2 2 0 0 1-3.46 0"></path>
   </svg>
 );
 
 const UserIcon = () => (
-  <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
     <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
     <circle cx="12" cy="7" r="4"></circle>
   </svg>
 );
 
 const DocumentIcon = () => (
-  <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
     <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
     <polyline points="14 2 14 8 20 8"></polyline>
     <line x1="16" y1="13" x2="8" y2="13"></line>
@@ -29,6 +50,7 @@ const DocumentIcon = () => (
 
 export default function HeaderActions() {
   const { language, t, changeLanguage } = useLanguage();
+  const { isDark, toggleTheme, colors } = useAppTheme();
   const [showLangMenu, setShowLangMenu] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
 
@@ -42,56 +64,105 @@ export default function HeaderActions() {
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
+  const menuItemStyle = (active: boolean): React.CSSProperties => ({
+    width: '100%', padding: '10px 14px',
+    display: 'flex', alignItems: 'center', gap: '10px',
+    background: active ? colors.accentDim : 'transparent',
+    border: 'none', cursor: 'pointer',
+    textAlign: 'left', fontSize: '13px',
+    color: active ? colors.accentL : colors.textLabel,
+    fontWeight: active ? 600 : 400,
+    fontFamily: "'Space Grotesk', sans-serif",
+    transition: 'all 0.15s',
+  });
+
   return (
     <div className="fms-actions">
-      <button className="action-btn" title={t.header.alerts}><span style={{ color: '#ef4444' }}><BellIcon /></span></button>
-      <button className="action-btn" title={t.header.documents}><DocumentIcon /></button>
-      
+      {/* Theme Toggle (Cinder Dark <-> Tally Light) */}
+      <button
+        className="action-btn"
+        onClick={toggleTheme}
+        title={isDark ? 'Giao diện sáng (Tally)' : 'Giao diện tối (Cinder)'}
+        style={{
+          color: isDark ? '#fbbf24' : '#6366f1',
+          background: isDark ? 'rgba(251,191,36,0.1)' : 'rgba(99,102,241,0.08)',
+          border: `1px solid ${isDark ? 'rgba(251,191,36,0.25)' : 'rgba(99,102,241,0.25)'}`,
+          transition: 'all 0.25s ease',
+        }}
+      >
+        {isDark ? <SunIcon /> : <MoonIcon />}
+      </button>
+
+      {/* Alert Bell */}
+      <button className="action-btn" title={t.header.alerts} style={{ position: 'relative' }}>
+        <span style={{ color: colors.rose }}><BellIcon /></span>
+        {/* Notification dot */}
+        <span style={{
+          position: 'absolute', top: '7px', right: '7px',
+          width: '6px', height: '6px', borderRadius: '50%',
+          background: colors.rose, boxShadow: `0 0 6px ${colors.rose}`
+        }} />
+      </button>
+
+      {/* Documents */}
+      <button className="action-btn" title={t.header.documents}>
+        <DocumentIcon />
+      </button>
+
+      {/* Language Selector */}
       <div style={{ position: 'relative' }} ref={menuRef}>
-        <button 
-          className="action-btn lang-btn" 
-          title={t.header.language} 
+        <button
+          className="action-btn lang-btn"
+          title={t.header.language}
           onClick={() => setShowLangMenu(!showLangMenu)}
+          style={{
+            width: 'auto', padding: '0 14px', gap: '6px', height: '40px',
+            borderRadius: '8px', fontSize: '14px', fontWeight: 600,
+            display: 'flex', alignItems: 'center',
+            background: colors.elevated, border: `1px solid ${colors.borderHard}`,
+            color: colors.textLabel, cursor: 'pointer',
+            fontFamily: "'Space Grotesk', sans-serif",
+            transition: 'all 0.2s'
+          }}
         >
-          <span className="flag-uk">{language === 'en' ? '🇬🇧' : '🇻🇳'}</span>
+          <span style={{ fontSize: '16px' }}>{language === 'en' ? '🇬🇧' : '🇻🇳'}</span>
+          <span>{language === 'en' ? 'EN' : 'VI'}</span>
         </button>
-        
+
         {showLangMenu && (
           <div style={{
-            position: 'absolute', top: '56px', right: '0', background: 'white', 
-            border: '1px solid #e2e8f0', borderRadius: '8px', boxShadow: '0 4px 12px rgba(0,0,0,0.1)',
-            overflow: 'hidden', zIndex: 100, width: '180px'
+            position: 'absolute', top: '48px', right: '0',
+            background: colors.elevated,
+            border: `1px solid ${colors.borderHard}`,
+            borderRadius: '10px',
+            boxShadow: isDark ? '0 20px 56px rgba(0,0,0,0.75), 0 0 0 1px rgba(99,102,241,0.2)' : '0 16px 40px rgba(0,0,0,0.12), 0 0 0 1px rgba(99,102,241,0.15)',
+            overflow: 'hidden', zIndex: 100, width: '170px',
           }}>
-            <button 
+            <button
               onClick={() => { changeLanguage('en'); setShowLangMenu(false); }}
-              style={{
-                width: '100%', padding: '12px 16px', display: 'flex', alignItems: 'center', gap: '12px',
-                background: language === 'en' ? '#f1f5f9' : 'transparent', border: 'none', cursor: 'pointer',
-                textAlign: 'left', fontSize: '16px', color: '#334155', fontWeight: '500',
-                borderBottom: '1px solid #e2e8f0'
-              }}
-              onMouseOver={(e) => { e.currentTarget.style.background = '#f8fafc'; }}
-              onMouseOut={(e) => { e.currentTarget.style.background = language === 'en' ? '#f1f5f9' : 'transparent'; }}
+              style={menuItemStyle(language === 'en')}
+              onMouseEnter={e => { if (language !== 'en') e.currentTarget.style.background = isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.04)'; }}
+              onMouseLeave={e => { e.currentTarget.style.background = language === 'en' ? colors.accentDim : 'transparent'; }}
             >
-              <span style={{ fontSize: '24px' }}>🇬🇧</span> English
+              <span style={{ fontSize: '20px' }}>🇬🇧</span> English
             </button>
-            <button 
+            <div style={{ height: '1px', background: colors.border }} />
+            <button
               onClick={() => { changeLanguage('vi'); setShowLangMenu(false); }}
-              style={{
-                width: '100%', padding: '12px 16px', display: 'flex', alignItems: 'center', gap: '12px',
-                background: language === 'vi' ? '#f1f5f9' : 'transparent', border: 'none', cursor: 'pointer',
-                textAlign: 'left', fontSize: '16px', color: '#334155', fontWeight: '500'
-              }}
-              onMouseOver={(e) => { e.currentTarget.style.background = '#f8fafc'; }}
-              onMouseOut={(e) => { e.currentTarget.style.background = language === 'vi' ? '#f1f5f9' : 'transparent'; }}
+              style={menuItemStyle(language === 'vi')}
+              onMouseEnter={e => { if (language !== 'vi') e.currentTarget.style.background = isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.04)'; }}
+              onMouseLeave={e => { e.currentTarget.style.background = language === 'vi' ? colors.accentDim : 'transparent'; }}
             >
-              <span style={{ fontSize: '24px' }}>🇻🇳</span> Tiếng Việt
+              <span style={{ fontSize: '20px' }}>🇻🇳</span> Tiếng Việt
             </button>
           </div>
         )}
       </div>
 
-      <button className="action-btn" title={t.header.profile}><UserIcon /></button>
+      {/* Profile */}
+      <button className="action-btn" title={t.header.profile}>
+        <UserIcon />
+      </button>
     </div>
   );
 }

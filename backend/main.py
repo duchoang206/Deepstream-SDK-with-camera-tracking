@@ -7,8 +7,9 @@ import uuid
 import json
 import asyncio
 import requests
+import cv2
 from typing import Dict, List, Set, Optional
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -30,11 +31,116 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+from fastapi import Request
+from fastapi.responses import JSONResponse
+import logging
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logging.error(f"Global Exception: {str(exc)}", exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"Internal Server Error: {str(exc)}"}
+    )
+
 MEDIAMTX_API = os.getenv("MEDIAMTX_API", "http://127.0.0.1:9997/v3/config/paths")
 
 # In-memory registry of active cameras
 cameras: Dict[str, dict] = {}
 
+from fastapi.responses import StreamingResponse
+import httpx
+
+class ChatMessage(BaseModel):
+    text: str
+    chat_history: Optional[str] = ""
+
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434/api/generate")
+
+SYSTEM_PROMPT_TEMPLATE = """Bạn là Trợ lý Ảo AI chuyên trách hỗ trợ vận hành và hướng dẫn sử dụng hệ thống RTC VMS.
+Nhiệm vụ của bạn là giải đáp thắc mắc, hướng dẫn người dùng thao tác giao diện hoặc cung cấp thông tin trạng thái hoạt động của hệ thống dựa CHÍNH XÁC vào các khối thông tin được cung cấp bên dưới.
+
+### NGUYÊN TẮC BẮT BUỘC:
+1. Độ ưu tiên thông tin:
+   - Nếu câu hỏi liên quan đến số lượng camera, số cảnh báo, trạng thái runtime hoặc sự kiện vừa xảy ra: Hãy đọc và sử dụng thông tin trong mục [TRẠNG THÁI HỆ THỐNG THỜI GIAN THỰC].
+   - Nếu câu hỏi là hướng dẫn thao tác, cách cấu hình, ý nghĩa các tab/nút bấm, thuật toán: Hãy đọc và sử dụng thông tin trong mục [TÀI LIỆU HƯỚNG DẪN KỸ THUẬT].
+2. Tính trung thực & Giới hạn dữ liệu:
+   - CHỈ trả lời dựa trên 2 nguồn dữ liệu được cấp. Tuyệt đối không tự suy diễn hoặc bịa đặt số liệu/tính năng không có trong tài liệu.
+   - Nếu cả 2 nguồn đều không có thông tin để trả lời câu hỏi, hãy phản hồi: "Xin lỗi, hiện tôi không tìm thấy thông tin/dữ liệu tương ứng trong hệ thống. Vui lòng liên hệ quản trị viên."
+3. Phong cách phản hồi:
+   - Ngắn gọn, súc tích, đi thẳng vào câu trả lời (tối đa 2 - 4 câu hoặc dùng gạch đầu dòng rõ ràng).
+   - Sử dụng tiếng Việt tự nhiên và giữ nguyên các thuật ngữ kỹ thuật trên giao diện (ví dụ: *Monitor*, *Building*, *Analytics*, *WHEP WebRTC*, *Homography 2D*, *MTMC Fusion*).
+
+---
+[TRẠNG THÁI HỆ THỐNG THỜI GIAN THỰC]:
+{system_state_context}
+---
+
+[TÀI LIỆU HƯỚNG DẪN KỸ THUẬT]:
+{retrieved_pdf_context}
+---
+
+[LỊCH SỬ HỘI THOẠI]:
+{chat_history}
+
+[CÂU HỎI CỦA NGƯỜI DÙNG]:
+{user_query}
+
+[TRẢ LỜI]:
+"""
+
+@app.post("/api/chat")
+async def chat_with_bot(req: ChatMessage):
+    user_query = req.text
+    chat_history = req.chat_history if req.chat_history else "Không có"
+    
+    # 1. Routing nhẹ: Kiểm tra xem query có cần dữ liệu DB thời gian thực không
+    realtime_keywords = ["mấy camera", "bao nhiêu cam", "cảnh báo", "trạng thái", "online", "sự kiện"]
+    needs_realtime = any(kw in user_query.lower() for kw in realtime_keywords)
+    
+    # 2. Lấy dữ liệu động từ PostgreSQL / Memory
+    if needs_realtime:
+        stats = db_manager.get_dashboard_stats(len(cameras))
+        system_state_context = f"- Số camera đang hoạt động: {len(cameras)}\n"
+        system_state_context += f"- Tổng số cảnh báo hôm nay: {stats.get('total_alarms', 0)}\n"
+        system_state_context += f"- Trạng thái AI Engine: Hoạt động (WHEP WebRTC Active)"
+    else:
+        system_state_context = "Không có yêu cầu kiểm tra trạng thái thời gian thực."
+
+    # 3. Lấy dữ liệu tĩnh từ ChromaDB (PDF Chunks)
+    from core.rag_manager import rag_engine
+    retrieved_pdf_context = rag_engine.query_rag(user_query, top_k=2)
+
+    # 4. Ghép hoàn chỉnh Prompt
+    prompt = SYSTEM_PROMPT_TEMPLATE.format(
+        system_state_context=system_state_context,
+        retrieved_pdf_context=retrieved_pdf_context,
+        chat_history=chat_history,
+        user_query=user_query
+    )
+    
+    async def generate_response():
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                async with client.stream('POST', OLLAMA_URL, json={
+                    "model": "qwen2.5:1.5b",
+                    "prompt": prompt,
+                    "stream": True
+                }) as response:
+                    # Nếu Ollama chưa chạy, sẽ báo lỗi ở đây
+                    async for chunk in response.aiter_lines():
+                        if chunk:
+                            try:
+                                data = json.loads(chunk)
+                                if 'response' in data:
+                                    yield data['response']
+                            except:
+                                pass
+        except Exception as e:
+            logging.error(f"Ollama Error: {str(e)}")
+            yield "Xin lỗi, hiện tại tôi không thể kết nối tới mô hình AI (Ollama). Vui lòng kiểm tra lại cấu hình."
+                        
+    return StreamingResponse(generate_response(), media_type="text/plain")
 # Active WebSocket connections
 connected_metadata_ws: Set[WebSocket] = set()
 connected_event_ws: Set[WebSocket] = set()
@@ -47,14 +153,18 @@ class CameraAddRequest(BaseModel):
 
 class CalibrationRequest(BaseModel):
     src_points: List[List[float]] # 4 points normalized [[x,y]...]
-    dst_points: List[List[float]] # 4 points floor map [[x,y]...]
+    dst_points: List[List[float]] # 4 points floor map [[X,Y]...]
+    cam_x: Optional[float] = None
+    cam_y: Optional[float] = None
+    cam_z: Optional[float] = None
+    yaw: Optional[float] = None
 
 class RuleItem(BaseModel):
     id: str
     type: str # intrusion, tripwire, dwell_time, density
     name: str
     points: List[List[float]] # polygon or line coordinates
-    target_objects: Optional[List[str]] = ["person"]
+    target_objects: Optional[List[str]] = ["robot", "rack"]
     threshold: Optional[float] = 10.0
     direction: Optional[str] = "both"
 
@@ -89,6 +199,11 @@ async def startup_event():
     global loop
     loop = asyncio.get_running_loop()
 
+    # Khởi tạo RAG (Load PDF into ChromaDB)
+    from core.rag_manager import rag_engine
+    rag_pdf_path = os.path.join(os.path.dirname(__file__), "rag_data", "main-10.pdf")
+    rag_engine.initialize_with_pdf(rag_pdf_path)
+
     # Wire DeepStream to the metadata broadcast callback
     deepstream_manager.metadata_callback = broadcast_metadata_sync
     deepstream_manager.event_callback = broadcast_event_sync
@@ -97,13 +212,31 @@ async def startup_event():
     db_cams = db_manager.get_all_cameras()
     for c in db_cams:
         cam_id = c["id"]
+        clean_url = sanitize_rtsp_url(c["rtsp_url"])
         cameras[cam_id] = {
             "id": cam_id,
             "name": c["name"],
-            "rtsp_url": c["rtsp_url"],
+            "rtsp_url": clean_url,
             "calibration": c.get("calibration_points"),
+            "cam_x": c.get("cam_x"),
+            "cam_y": c.get("cam_y"),
+            "cam_z": c.get("cam_z"),
+            "yaw": c.get("yaw"),
+            "fov_polygon": c.get("fov_polygon"),
             "status": "online"
         }
+        
+        # Ensure MediaMTX knows about this stream (useful on restarts)
+        try:
+            res = requests.post(f"{MEDIAMTX_API}/add/{cam_id}", json={
+                "source": clean_url,
+                "sourceOnDemand": False,
+                "rtspTransport": "tcp"
+            }, timeout=2)
+            if res.status_code not in (200, 201):
+                requests.post(f"{MEDIAMTX_API}/patch/{cam_id}", json={"source": clean_url}, timeout=2)
+        except Exception as e:
+            print(f"[MediaMTX] Startup proxy path registration failed for {cam_id}: {e}")
 
     # Collect all cameras for static pre-loading into the pipeline (safe DeepStream pattern)
     # Only cameras reachable via TCP are added initially.
@@ -120,7 +253,11 @@ async def startup_event():
             camera_calibrator.set_calibration(
                 cam_id,
                 calib_pts.get("src_points", []),
-                calib_pts.get("dst_points", [])
+                calib_pts.get("dst_points", []),
+                c.get("cam_x"),
+                c.get("cam_y"),
+                c.get("cam_z"),
+                c.get("yaw")
             )
         # Load behavior rules
         rules = db_manager.get_rules_by_camera(cam_id)
@@ -146,6 +283,7 @@ async def startup_event():
         else:
             offline_cameras.append((cam_id, rtsp_url))
             print(f"[Main] Camera {cam_id} unreachable at startup - will retry in background.", flush=True)
+
 
     # Start DeepStream Pipeline with reachable cameras pre-loaded (NULL → PLAYING in one step).
     # This avoids the SIGABRT caused by dynamic source add on a running nvinfer pipeline.
@@ -214,51 +352,48 @@ async def websocket_events_endpoint(websocket: WebSocket):
 @app.post("/api/v1/streams/add")
 @app.post("/api/camera/add")
 async def add_camera(request: CameraAddRequest):
+    cam_id = str(uuid.uuid4())[:8]
+    clean_url = sanitize_rtsp_url(request.rtsp_url)
+    
+    # 1. Check RTSP asynchronously with 2.5s timeout (non-blocking)
+    from check_rtsp import is_rtsp_valid_async
+    is_valid = await is_rtsp_valid_async(clean_url, timeout=2.5)
+    
+    status = "online" if is_valid else "offline"
+
+    # 2. Save to DB decoupled from pipeline
     try:
-        cam_id = str(uuid.uuid4())[:8]
-        clean_url = sanitize_rtsp_url(request.rtsp_url)
-        
-        # 1. Register Camera Stream in MediaMTX for direct WebRTC/WHEP streaming
-        try:
-            res = requests.post(f"{MEDIAMTX_API}/add/{cam_id}", json={
-                "source": clean_url,
-                "sourceOnDemand": False,
-                "rtspTransport": "tcp"
-            }, timeout=4)
-            if res.status_code not in (200, 201):
-                requests.post(f"{MEDIAMTX_API}/patch/{cam_id}", json={"source": clean_url}, timeout=2)
-        except Exception as e:
-            print(f"[MediaMTX] Note: proxy path registration: {e}")
-
-        # 2. Pre-validate stream
-        try:
-            from check_rtsp import is_rtsp_valid_async
-            is_valid = await is_rtsp_valid_async(clean_url, timeout=3)
-
-            if is_valid:
-                deepstream_manager.add_source(cam_id, clean_url)
-            else:
-                print(f"[Main] Warning: Stream {clean_url} is unreachable. Saved to DB but not added to tracking.")
-        except Exception as e:
-            print(f"[Main] Note checking RTSP: {e}")
-
-        # 3. Save to DB regardless of validation (as requested by user)
-        try:
-            db_manager.save_camera(cam_id, request.name, clean_url)
-        except Exception as e:
-            print(f"[Main] Database save camera warning: {e}")
-
-        cameras[cam_id] = {
-            "id": cam_id,
-            "name": request.name,
-            "rtsp_url": clean_url,
-            "status": "online"
-        }
-        
-        return {"status": "success", "camera": cameras[cam_id]}
+        db_manager.save_camera(cam_id, request.name, clean_url)
     except Exception as e:
-        print(f"[Main] Error in add_camera: {e}")
-        raise HTTPException(status_code=400, detail=f"Lỗi khi thêm camera: {str(e)}")
+        print(f"[Main] Database save camera warning: {e}")
+        
+    cameras[cam_id] = {
+        "id": cam_id,
+        "name": request.name,
+        "rtsp_url": clean_url,
+        "status": status
+    }
+    
+    # 3. Register Camera Stream in MediaMTX for direct WebRTC/WHEP streaming (background / fast)
+    try:
+        res = requests.post(f"{MEDIAMTX_API}/add/{cam_id}", json={
+            "source": clean_url,
+            "sourceOnDemand": False,
+            "rtspTransport": "tcp"
+        }, timeout=1.5)
+        if res.status_code not in (200, 201):
+            requests.post(f"{MEDIAMTX_API}/patch/{cam_id}", json={"source": clean_url}, timeout=1.0)
+    except Exception as e:
+        print(f"[MediaMTX] Note: proxy path registration: {e}")
+
+    # 4. If stream is not reachable, return HTTP 400 gracefully
+    if not is_valid:
+        raise HTTPException(status_code=400, detail="Không thể kết nối tới RTSP IP, vui lòng kiểm tra mạng.")
+
+    # 5. If valid, safely add to DeepStream engine (via GLib.idle_add internally)
+    deepstream_manager.add_source(cam_id, clean_url)
+    
+    return {"status": "success", "camera": cameras[cam_id]}
 
 class CameraUpdateRequest(BaseModel):
     name: Optional[str] = None
@@ -309,20 +444,58 @@ async def list_cameras():
         "cameras": list(cameras.values())
     }
 
+@app.get("/api/camera/{cam_id}/snapshot")
+async def get_camera_snapshot(cam_id: str):
+    if cam_id not in cameras:
+        raise HTTPException(status_code=404, detail="Camera not found")
+        
+    def _grab():
+        rtsp_url = f"rtsp://localhost:8554/{cam_id}"
+        cap = cv2.VideoCapture(rtsp_url)
+        ret, frame = cap.read()
+        cap.release()
+        
+        if not ret or frame is None:
+            direct_url = cameras[cam_id].get("rtsp_url")
+            if direct_url:
+                cap = cv2.VideoCapture(direct_url)
+                ret, frame = cap.read()
+                cap.release()
+                
+        if not ret or frame is None:
+            return None
+            
+        ret_encode, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        if not ret_encode:
+            return None
+        return buffer.tobytes()
+
+    loop = asyncio.get_event_loop()
+    img_bytes = await loop.run_in_executor(None, _grab)
+    if img_bytes is None:
+        raise HTTPException(status_code=500, detail="Không thể chụp snapshot từ camera")
+        
+    return Response(content=img_bytes, media_type="image/jpeg")
+
 # --- CAMERA CALIBRATION API (2D-to-Floor-Map) ---
 @app.post("/api/camera/{cam_id}/calibration")
 async def save_camera_calibration(cam_id: str, calib: CalibrationRequest):
     if cam_id not in cameras:
         raise HTTPException(status_code=404, detail="Camera not found")
         
-    success = camera_calibrator.set_calibration(cam_id, calib.src_points, calib.dst_points)
+    success = camera_calibrator.set_calibration(cam_id, calib.src_points, calib.dst_points, calib.cam_x, calib.cam_y, calib.cam_z, calib.yaw)
     if not success:
         raise HTTPException(status_code=400, detail="Không thể tính ma trận biến đổi từ các điểm đã chọn")
         
     cfg = camera_calibrator.get_config(cam_id)
     if cfg:
-        db_manager.save_calibration(cam_id, calib.src_points, calib.dst_points, cfg["matrix"])
+        db_manager.save_calibration(cam_id, calib.src_points, calib.dst_points, cfg["matrix"], calib.cam_x, calib.cam_y, calib.cam_z, calib.yaw, cfg.get("fov_polygon"))
         cameras[cam_id]["calibration"] = cfg
+        cameras[cam_id]["cam_x"] = calib.cam_x
+        cameras[cam_id]["cam_y"] = calib.cam_y
+        cameras[cam_id]["cam_z"] = calib.cam_z
+        cameras[cam_id]["yaw"] = calib.yaw
+        cameras[cam_id]["fov_polygon"] = cfg.get("fov_polygon")
         
     return {"status": "success", "config": cfg}
 
@@ -330,6 +503,18 @@ async def save_camera_calibration(cam_id: str, calib: CalibrationRequest):
 async def get_camera_calibration(cam_id: str):
     cfg = camera_calibrator.get_config(cam_id)
     return {"status": "success", "calibration": cfg}
+
+@app.get("/api/calibration/map-overview")
+async def get_map_overview():
+    calibrations = []
+    for cam_id, cam in cameras.items():
+        if "calibration" in cam and cam["calibration"]:
+            calibrations.append({
+                "cam_id": cam_id,
+                "name": cam["name"],
+                "calibration": cam["calibration"]
+            })
+    return {"status": "success", "calibrations": calibrations}
 
 # --- BEHAVIOR RULES (ROI & TRIPWIRES) API ---
 @app.post("/api/camera/{cam_id}/rules")
@@ -368,8 +553,18 @@ async def get_dashboard_analytics():
     return stats
 
 @app.get("/api/analytics/classes")
-async def get_analytics_classes():
-    return {"status": "success", "labels": ["person"]}
+@app.get("/api/model/classes")
+async def get_model_classes():
+    labels_file = os.path.join(os.path.dirname(__file__), "models_config", "labels.txt")
+    classes = []
+    try:
+        with open(labels_file, "r") as f:
+            classes = [line.strip() for line in f.readlines() if line.strip()]
+    except Exception as e:
+        import logging
+        logging.error(f"Error reading labels.txt: {e}")
+        classes = ["robot", "rack"]
+    return {"status": "success", "classes": classes}
 
 @app.get("/api/events/list")
 async def list_events(

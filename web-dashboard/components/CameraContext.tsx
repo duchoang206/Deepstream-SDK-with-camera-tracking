@@ -7,6 +7,11 @@ export type Camera = {
   name: string;
   rtsp_url: string;
   calibration?: any;
+  cam_x?: number;
+  cam_y?: number;
+  cam_z?: number;
+  yaw?: number;
+  fov_polygon?: number[][];
   status?: string;
 };
 

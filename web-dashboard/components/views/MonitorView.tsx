@@ -3,6 +3,7 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react';
 import { useLanguage } from '../LanguageContext';
 import { useCameras, Camera } from '../CameraContext';
+import { useAppTheme } from '../ThemeContext';
 import { Activity, ShieldAlert, Users, Layers, AlertCircle, ArrowRightLeft, Radio } from 'lucide-react';
 
 type TrackedObject = {
@@ -29,6 +30,8 @@ type LiveAlert = {
 
 type InterpolatedTrack = {
   id: number;
+  class?: string;
+  label?: string;
   curX: number;
   curY: number;
   curW: number;
@@ -42,18 +45,42 @@ type InterpolatedTrack = {
   lastUpdated: number;
 };
 
+type InterpolatedFloorTrack = {
+  id: number;
+  class?: string;
+  curFx: number;
+  curFy: number;
+  targetFx: number;
+  targetFy: number;
+  cam: string;
+  lastUpdated: number;
+};
+
+type ROIState = {
+  roi_id: string;
+  name: string;
+  status: 'OCCUPIED' | 'EMPTY';
+  overlap_ratio: number;
+  occupant_ids: number[];
+  polygon: number[][];
+  rule_type: string;
+  threshold?: number;
+};
+
 function CameraStreamCard({
   cam,
   hostName,
   isVisible,
   activeTab,
-  metadataMap
+  metadataMap,
+  roisMap
 }: {
   cam: Camera;
   hostName: string;
   isVisible: boolean;
   activeTab: string;
   metadataMap: React.MutableRefObject<Map<string, Map<number, InterpolatedTrack>>>;
+  roisMap: React.MutableRefObject<Map<string, ROIState[]>>;
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -141,7 +168,7 @@ function CameraStreamCard({
     };
   }, [cam.id, hostName]);
 
-  // 2. 60 FPS Real-time Tracking Canvas Render
+  // 2. 60 FPS Real-time Tracking & ROI Canvas Render
   useEffect(() => {
     let animId: number;
 
@@ -159,6 +186,62 @@ function CameraStreamCard({
         if (ctx) {
           ctx.clearRect(0, 0, canvas.width, canvas.height);
 
+          // --- A. Render Active ROI Zones (EMPTY: Cyan / CARFULL: Rose) ---
+          const camRois = roisMap.current?.get(cam.id) || [];
+          camRois.forEach(roi => {
+            if (!roi.polygon || roi.polygon.length < 3) return;
+            const isCarFull = (roi.status as string) === 'CARFULL' || roi.status === 'OCCUPIED';
+            const strokeColor = isCarFull ? '#f43f5e' : '#22d3ee';
+            const fillColor = isCarFull ? 'rgba(244, 63, 94, 0.30)' : 'rgba(34, 211, 238, 0.12)';
+
+            ctx.save();
+            ctx.beginPath();
+            roi.polygon.forEach((pt, idx) => {
+              const x = pt[0] * canvas.width;
+              const y = pt[1] * canvas.height;
+              if (idx === 0) ctx.moveTo(x, y);
+              else ctx.lineTo(x, y);
+            });
+            ctx.closePath();
+            ctx.lineWidth = isCarFull ? 2.5 : 1.5;
+            ctx.strokeStyle = strokeColor;
+            ctx.shadowColor = strokeColor;
+            ctx.shadowBlur = 8;
+            ctx.stroke();
+            ctx.shadowBlur = 0;
+            ctx.fillStyle = fillColor;
+            ctx.fill();
+
+            // Draw ROI Status Badge Tag
+            const firstPt = roi.polygon[0];
+            const tagX = Math.max(4, Math.min(canvas.width - 220, firstPt[0] * canvas.width));
+            const tagY = Math.max(22, firstPt[1] * canvas.height);
+            const tagText = isCarFull
+              ? `⚠ ${roi.name} · CARFULL`
+              : `${roi.name} · EMPTY`;
+
+            ctx.font = 'bold 12px "Space Grotesk", Inter, sans-serif';
+            const metrics = ctx.measureText(tagText);
+            const bgW = metrics.width + 16;
+            const bgH = 22;
+            const bgY = Math.max(0, tagY - bgH - 4);
+
+            // Rounded pill badge
+            ctx.fillStyle = isCarFull ? 'rgba(244, 63, 94, 0.92)' : 'rgba(34, 211, 238, 0.15)';
+            ctx.strokeStyle = isCarFull ? '#f43f5e' : '#22d3ee';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.roundRect(tagX, bgY, bgW, bgH, 4);
+            ctx.fill();
+            ctx.stroke();
+
+            ctx.fillStyle = isCarFull ? '#fff' : '#22d3ee';
+            ctx.shadowBlur = 0;
+            ctx.fillText(tagText, tagX + 8, bgY + 14.5);
+            ctx.restore();
+          });
+
+          // --- B. Render Tracked Objects (BBox + Tags) ---
           const camTracks = metadataMap.current.get(cam.id);
           const now = Date.now();
 
@@ -182,31 +265,43 @@ function CameraStreamCard({
               const pw = track.curW * canvas.width;
               const ph = track.curH * canvas.height;
 
-              // 1. Red Bounding Box (matching DeepStream OSD bbox-border-color0=1;0;0;1)
-              ctx.strokeStyle = '#e53e3e';
-              ctx.lineWidth = 2;
-              ctx.shadowBlur = 0;
-              ctx.strokeRect(px, py, pw, ph);
+              // Class & label formatting
+              const rawClass = (track.label || track.class || 'Object').toLowerCase();
+              const isRobot = rawClass.includes('robot');
+              const isRack = rawClass.includes('rack');
+              const displayClass = isRobot ? 'delivery-robot' : (isRack ? 'rack' : rawClass);
+              const label = `${displayClass} #${track.id}`;
 
-              // 2. Translucent red overlay fill (matching DeepStream display-mask)
-              ctx.fillStyle = 'rgba(229, 62, 62, 0.28)';
+              // Cinder accent colors
+              const strokeColor = isRobot ? '#f43f5e' : '#6366f1';
+              const fillColor = isRobot ? 'rgba(244, 63, 94, 0.20)' : 'rgba(99, 102, 241, 0.15)';
+
+              ctx.save();
+              ctx.strokeStyle = strokeColor;
+              ctx.lineWidth = 1.5;
+              ctx.shadowColor = strokeColor;
+              ctx.shadowBlur = 10;
+              ctx.strokeRect(px, py, pw, ph);
+              ctx.shadowBlur = 0;
+
+              ctx.fillStyle = fillColor;
               ctx.fillRect(px, py, pw, ph);
 
-              // 3. "person <id>" Label Tag (matching DeepStream OSD font=Serif, text-bg-color=0.3;0.3;0.3;1)
-              const label = `person ${track.id}`;
-              ctx.font = '14px Serif, "Times New Roman", Georgia, serif';
+              // Label Tag Badge
+              ctx.font = '12px "JetBrains Mono", "Space Grotesk", monospace';
               const textMetrics = ctx.measureText(label);
-              const tagW = textMetrics.width + 10;
-              const tagH = 20;
+              const tagW = textMetrics.width + 12;
+              const tagH = 18;
               const tagY = Math.max(0, py - tagH);
 
-              // Dark grey background for label badge (#4d4d4d / rgb(77, 77, 77))
-              ctx.fillStyle = 'rgba(70, 70, 70, 0.9)';
-              ctx.fillRect(px, tagY, tagW, tagH);
+              ctx.fillStyle = isRobot ? 'rgba(244, 63, 94, 0.90)' : 'rgba(99, 102, 241, 0.90)';
+              ctx.beginPath();
+              ctx.roundRect(px, tagY, tagW, tagH, [3, 3, 3, 0]);
+              ctx.fill();
 
-              // White label text
               ctx.fillStyle = '#ffffff';
-              ctx.fillText(label, px + 5, tagY + 14);
+              ctx.fillText(label, px + 6, tagY + 12.5);
+              ctx.restore();
             });
           }
         }
@@ -216,7 +311,7 @@ function CameraStreamCard({
 
     animId = requestAnimationFrame(render);
     return () => cancelAnimationFrame(animId);
-  }, [cam.id, metadataMap]);
+  }, [cam.id, metadataMap, roisMap]);
 
   return (
     <div
@@ -224,28 +319,42 @@ function CameraStreamCard({
       style={{
         display: isVisible ? 'flex' : 'none',
         flexDirection: 'column',
-        borderRadius: '12px',
+        borderRadius: '10px',
         overflow: 'hidden',
-        border: '1px solid #e2e8f0',
-        background: '#0f172a',
-        boxShadow: '0 4px 6px -1px rgba(0,0,0,0.1)',
+        border: '1px solid #2a2a38',
+        background: '#18181d',
+        boxShadow: '0 4px 24px rgba(0,0,0,0.4)',
         ...(activeTab !== 'all' ? { width: '100%', maxWidth: '1200px', margin: '0 auto' } : {})
       }}
     >
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px', background: '#1e293b', borderBottom: '1px solid #334155', color: '#f8fafc' }}>
+      {/* Card Header */}
+      <div style={{
+        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+        padding: '10px 14px',
+        background: '#1f1f27',
+        borderBottom: '1px solid #2a2a38',
+        color: '#f4f4f5'
+      }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-          <span style={{ display: 'inline-block', width: '10px', height: '10px', borderRadius: '50%', background: '#22c55e', boxShadow: '0 0 8px #22c55e' }}></span>
-          <span style={{ fontWeight: 600, fontSize: '15px' }}>{cam.name}</span>
+          <span style={{
+            display: 'inline-block', width: '7px', height: '7px', borderRadius: '50%',
+            background: '#22d3ee', boxShadow: '0 0 8px #22d3ee'
+          }}></span>
+          <span style={{ fontWeight: 600, fontSize: '13px', letterSpacing: '0.01em' }}>{cam.name}</span>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-          <span style={{ fontSize: '11px', background: 'rgba(34, 197, 94, 0.2)', color: '#4ade80', padding: '2px 8px', borderRadius: '4px', fontWeight: 600 }}>
-            WHEP WebRTC
+          <span style={{
+            fontSize: '10px', background: 'rgba(99,102,241,0.15)', color: '#818cf8',
+            padding: '2px 8px', borderRadius: '4px', fontWeight: 600,
+            border: '1px solid rgba(99,102,241,0.3)', fontFamily: 'monospace'
+          }}>
+            WHEP · WebRTC
           </span>
-          <span style={{ fontSize: '11px', color: '#94a3b8' }}>&lt; 25ms</span>
+          <span style={{ fontSize: '10px', color: '#52525b', fontFamily: 'monospace' }}>&lt; 25ms</span>
         </div>
       </div>
 
-      <div className="video-frame" ref={containerRef} style={{ position: 'relative', width: '100%', aspectRatio: '16/9', background: '#090d16', overflow: 'hidden' }}>
+      <div className="video-frame" ref={containerRef} style={{ position: 'relative', width: '100%', aspectRatio: '16/9', background: '#09090b', overflow: 'hidden' }}>
         {useIframeFallback ? (
           <iframe
             src={`http://${hostName}:8081/${cam.id}/?controls=0&autoplay=1&muted=1&playsinline=1`}
@@ -266,29 +375,33 @@ function CameraStreamCard({
               position: 'absolute',
               top: 0,
               left: 0,
-              background: '#090d16'
+              background: '#09090b'
             }}
           />
         )}
 
-        {/* Loading Spinner Indicator if waiting for initial stream keyframe */}
+        {/* Loading Spinner */}
         {!isPlaying && (
-          <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', background: 'rgba(9, 13, 22, 0.75)', zIndex: 5, gap: '10px' }}>
-            <div style={{ width: '28px', height: '28px', border: '3px solid #334155', borderTopColor: '#3b82f6', borderRadius: '50%', animation: 'spin 1s linear infinite' }} />
-            <span style={{ fontSize: '12px', color: '#94a3b8' }}>Đang kết nối luồng camera...</span>
+          <div style={{
+            position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column',
+            alignItems: 'center', justifyContent: 'center',
+            background: 'rgba(9, 9, 11, 0.85)', zIndex: 5, gap: '10px'
+          }}>
+            <div style={{
+              width: '26px', height: '26px',
+              border: '2px solid #2a2a38', borderTopColor: '#6366f1',
+              borderRadius: '50%', animation: 'spin 1s linear infinite'
+            }} />
+            <span style={{ fontSize: '11px', color: '#52525b', fontFamily: 'monospace' }}>Đang kết nối luồng camera...</span>
           </div>
         )}
 
         <canvas
           ref={canvasRef}
           style={{
-            position: 'absolute',
-            top: 0,
-            left: 0,
-            width: '100%',
-            height: '100%',
-            pointerEvents: 'none',
-            zIndex: 10
+            position: 'absolute', top: 0, left: 0,
+            width: '100%', height: '100%',
+            pointerEvents: 'none', zIndex: 10
           }}
         />
       </div>
@@ -302,10 +415,51 @@ export default function MonitorView() {
   const [hostName, setHostName] = useState('localhost');
   const [totalDetections, setTotalDetections] = useState(0);
   const [liveAlerts, setLiveAlerts] = useState<LiveAlert[]>([]);
-  const [globalTrackList, setGlobalTrackList] = useState<{ id: number; fx: number; fy: number; cam: string }[]>([]);
+  const [globalTrackList, setGlobalTrackList] = useState<{ id: number; fx: number; fy: number; cam: string; class?: string }[]>([]);
+  const [floorTracks, setFloorTracks] = useState<InterpolatedFloorTrack[]>([]);
+  const [mapOverview, setMapOverview] = useState<any[]>([]);
+  const [cameraRois, setCameraRois] = useState<Record<string, ROIState[]>>({});
   const { t } = useLanguage();
 
   const metadataMap = useRef<Map<string, Map<number, InterpolatedTrack>>>(new Map());
+  const floorTrackMap = useRef<Map<number, InterpolatedFloorTrack>>(new Map());
+  const roisMap = useRef<Map<string, ROIState[]>>(new Map());
+
+  // 60 FPS Smooth Interpolation Loop for Floor Plan
+  useEffect(() => {
+    let animId: number;
+    const renderFloor = () => {
+      const now = Date.now();
+      const active: InterpolatedFloorTrack[] = [];
+
+      floorTrackMap.current.forEach((t, id) => {
+        if (now - t.lastUpdated > 1200) {
+          floorTrackMap.current.delete(id);
+          return;
+        }
+        const lerpFactor = 0.20;
+        t.curFx += (t.targetFx - t.curFx) * lerpFactor;
+        t.curFy += (t.targetFy - t.curFy) * lerpFactor;
+        active.push({ ...t });
+      });
+
+      setFloorTracks(active);
+      animId = requestAnimationFrame(renderFloor);
+    };
+
+    animId = requestAnimationFrame(renderFloor);
+    return () => cancelAnimationFrame(animId);
+  }, []);
+
+  // Fetch map overview calibration polygons
+  useEffect(() => {
+    fetch('/api/backend/calibration/map-overview')
+      .then(res => (res.ok ? res.json() : null))
+      .then(data => {
+        if (data?.calibrations) setMapOverview(data.calibrations);
+      })
+      .catch(() => {});
+  }, [cameras]);
 
   // WebSockets for Metadata & Events
   useEffect(() => {
@@ -324,10 +478,15 @@ export default function MonitorView() {
             if (data.streams && Array.isArray(data.streams)) {
               let count = 0;
               const now = Date.now();
-              const activeGlobals: { id: number; fx: number; fy: number; cam: string }[] = [];
+              const activeGlobals: { id: number; fx: number; fy: number; cam: string; class?: string }[] = [];
 
-              data.streams.forEach((stream: { cam_id: string; objects: TrackedObject[] }) => {
+              data.streams.forEach((stream: { cam_id: string; objects: TrackedObject[]; rois?: ROIState[] }) => {
                 const camId = stream.cam_id;
+
+                if (stream.rois && Array.isArray(stream.rois)) {
+                  roisMap.current.set(camId, stream.rois);
+                }
+
                 if (!metadataMap.current.has(camId)) {
                   metadataMap.current.set(camId, new Map());
                 }
@@ -337,31 +496,35 @@ export default function MonitorView() {
                   count++;
                   const fx = obj.floor_x ?? (obj.x + obj.w / 2);
                   const fy = obj.floor_y ?? (obj.y + obj.h);
-                  activeGlobals.push({ id: obj.id, fx, fy, cam: camId });
+                  activeGlobals.push({ id: obj.id, fx, fy, cam: camId, class: obj.class });
+
+                  if (!floorTrackMap.current.has(obj.id)) {
+                    floorTrackMap.current.set(obj.id, {
+                      id: obj.id, class: obj.class,
+                      curFx: fx, curFy: fy,
+                      targetFx: fx, targetFy: fy,
+                      cam: camId, lastUpdated: now
+                    });
+                  } else {
+                    const ft = floorTrackMap.current.get(obj.id)!;
+                    if (obj.class) ft.class = obj.class;
+                    ft.targetFx = fx; ft.targetFy = fy;
+                    ft.cam = camId; ft.lastUpdated = now;
+                  }
 
                   if (!tracks.has(obj.id)) {
                     tracks.set(obj.id, {
-                      id: obj.id,
-                      curX: obj.x,
-                      curY: obj.y,
-                      curW: obj.w,
-                      curH: obj.h,
-                      targetX: obj.x,
-                      targetY: obj.y,
-                      targetW: obj.w,
-                      targetH: obj.h,
-                      floorX: fx,
-                      floorY: fy,
-                      lastUpdated: now
+                      id: obj.id, class: obj.class,
+                      curX: obj.x, curY: obj.y, curW: obj.w, curH: obj.h,
+                      targetX: obj.x, targetY: obj.y, targetW: obj.w, targetH: obj.h,
+                      floorX: fx, floorY: fy, lastUpdated: now
                     });
                   } else {
                     const track = tracks.get(obj.id)!;
-                    track.targetX = obj.x;
-                    track.targetY = obj.y;
-                    track.targetW = obj.w;
-                    track.targetH = obj.h;
-                    track.floorX = fx;
-                    track.floorY = fy;
+                    track.class = obj.class;
+                    track.targetX = obj.x; track.targetY = obj.y;
+                    track.targetW = obj.w; track.targetH = obj.h;
+                    track.floorX = fx; track.floorY = fy;
                     track.lastUpdated = now;
                   }
                 });
@@ -369,6 +532,7 @@ export default function MonitorView() {
 
               setTotalDetections(count);
               setGlobalTrackList(activeGlobals);
+              setCameraRois(Object.fromEntries(roisMap.current));
             }
           } catch (e) {}
         };
@@ -379,8 +543,10 @@ export default function MonitorView() {
         wsEvents = new WebSocket(`ws://${host}:8000/ws/events`);
         wsEvents.onmessage = (event) => {
           try {
-            const ev = JSON.parse(event.data);
-            setLiveAlerts(prev => [ev, ...prev.slice(0, 19)]);
+            const data = JSON.parse(event.data);
+            if (data.event) {
+              setLiveAlerts(prev => [data.event, ...prev].slice(0, 30));
+            }
           } catch (e) {}
         };
         wsEvents.onclose = () => setTimeout(connectEvents, 2500);
@@ -396,41 +562,97 @@ export default function MonitorView() {
     }
   }, []);
 
-  return (
-    <div style={{ backgroundColor: '#f8fafc', minHeight: 'calc(100vh - 84px)', display: 'flex', flexDirection: 'column' }}>
-      {/* Sub Header Navigation */}
-      <div className="sub-header" style={{ padding: '12px 24px', background: 'white', borderBottom: '1px solid #e2e8f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <div className="sub-tabs" style={{ display: 'flex', gap: '8px' }}>
-          <button className={`sub-tab ${activeTab === 'all' ? 'active' : ''}`} onClick={() => setActiveTab('all')}>
-            {t.monitor.allCamera} ({cameras.length})
-          </button>
-          {cameras.map(cam => (
-            <button key={cam.id} className={`sub-tab ${activeTab === cam.id ? 'active' : ''}`} onClick={() => setActiveTab(cam.id)}>
-              {cam.name}
-            </button>
-          ))}
-        </div>
+  const { colors: C, isDark } = useAppTheme();
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', background: '#ecfdf5', border: '1px solid #a7f3d0', padding: '6px 14px', borderRadius: '20px' }}>
-            <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#10b981', animation: 'pulse 2s infinite' }}></span>
-            <span style={{ fontSize: '13px', fontWeight: 600, color: '#047857' }}>MTMC Fusion Active</span>
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: C.bg, transition: 'background-color 0.2s ease' }}>
+
+      {/* Top Monitor Navigation */}
+      <div style={{
+        background: C.surface,
+        borderBottom: `1px solid ${C.border}`,
+        padding: '12px 20px',
+      }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div style={{ display: 'flex', gap: '6px' }}>
+            <button
+              onClick={() => setActiveTab('all')}
+              style={{
+                padding: '7px 14px', borderRadius: '7px', cursor: 'pointer',
+                fontSize: '12px', fontWeight: 600,
+                border: activeTab === 'all' ? `1px solid ${C.accent}` : `1px solid ${C.border}`,
+                background: activeTab === 'all' ? C.accentDim : 'transparent',
+                color: activeTab === 'all' ? C.accentGlow : C.textSecondary,
+                boxShadow: activeTab === 'all' ? `0 0 12px ${C.accentGlow}` : 'none',
+                transition: 'all 0.2s'
+              }}
+            >
+              {t.monitor.allCamera} ({cameras.length})
+            </button>
+            {cameras.map(c => (
+              <button
+                key={c.id}
+                onClick={() => setActiveTab(c.id)}
+                style={{
+                  padding: '7px 14px', borderRadius: '7px', cursor: 'pointer',
+                  fontSize: '12px', fontWeight: 600,
+                  border: activeTab === c.id ? `1px solid ${C.accent}` : `1px solid ${C.border}`,
+                  background: activeTab === c.id ? 'rgba(99,102,241,0.15)' : 'transparent',
+                  color: activeTab === c.id ? C.accentGlow : C.textSecondary,
+                  boxShadow: activeTab === c.id ? `0 0 12px rgba(99,102,241,0.2)` : 'none',
+                  transition: 'all 0.2s'
+                }}
+              >
+                {c.name}
+              </button>
+            ))}
+          </div>
+
+          {/* MTMC Status Badge */}
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: '8px',
+            background: 'rgba(34,211,238,0.08)',
+            border: '1px solid rgba(34,211,238,0.25)',
+            padding: '5px 12px', borderRadius: '20px'
+          }}>
+            <span style={{
+              width: '6px', height: '6px', borderRadius: '50%',
+              background: C.cyan, animation: 'pulse 2s infinite',
+              boxShadow: `0 0 8px ${C.cyan}`
+            }}></span>
+            <span style={{ fontSize: '12px', fontWeight: 600, color: C.cyan, fontFamily: 'monospace' }}>
+              MTMC FUSION ACTIVE
+            </span>
           </div>
         </div>
       </div>
 
-      {/* Main Multi-Camera Grid & Floor Plan Area */}
-      <div style={{ flex: 1, padding: '24px', display: 'flex', gap: '24px', overflow: 'hidden' }}>
+      {/* Main Content */}
+      <div style={{ flex: 1, padding: '20px', display: 'flex', gap: '20px', overflow: 'hidden' }}>
         {cameras.length === 0 ? (
-          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: '#94a3b8' }}>
-            <p style={{ fontSize: '20px', fontWeight: 600 }}>{t.monitor.noCamera}</p>
-            <p style={{ fontSize: '14px', color: '#64748b', marginTop: '8px' }}>Chuyển sang tab <b>Building</b> để thêm Camera RTSP và thiết lập Calibration</p>
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: C.textMuted }}>
+            <div style={{
+              width: '64px', height: '64px', borderRadius: '16px',
+              background: 'rgba(99,102,241,0.1)', border: `1px solid ${C.border}`,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              marginBottom: '16px'
+            }}>
+              <Activity size={28} color={C.textMuted} />
+            </div>
+            <p style={{ fontSize: '18px', fontWeight: 600, color: C.textSecondary }}>{t.monitor.noCamera}</p>
+            <p style={{ fontSize: '13px', color: C.textMuted, marginTop: '8px', textAlign: 'center' }}>
+              Chuyển sang tab <b style={{ color: C.accentGlow }}>Building</b> để thêm Camera RTSP và thiết lập Calibration
+            </p>
           </div>
         ) : (
           <>
-            {/* Left: Video Streams Grid */}
-            <div style={{ flex: 3, overflowY: 'auto', paddingRight: '8px' }}>
-              <div style={{ display: 'grid', gridTemplateColumns: activeTab === 'all' ? 'repeat(auto-fit, minmax(420px, 1fr))' : '1fr', gap: '20px' }}>
+            {/* Left: Video Grid */}
+            <div style={{ flex: 3, overflowY: 'auto', paddingRight: '6px' }}>
+              <div style={{
+                display: 'grid',
+                gridTemplateColumns: activeTab === 'all' ? 'repeat(auto-fit, minmax(400px, 1fr))' : '1fr',
+                gap: '16px'
+              }}>
                 {cameras.map(cam => (
                   <CameraStreamCard
                     key={cam.id}
@@ -439,106 +661,311 @@ export default function MonitorView() {
                     isVisible={activeTab === 'all' || activeTab === cam.id}
                     activeTab={activeTab}
                     metadataMap={metadataMap}
+                    roisMap={roisMap}
                   />
                 ))}
               </div>
             </div>
 
-            {/* Right: Floor Plan 2D Mini-Map & Live Telemetry Panel */}
-            <div style={{ flex: 1.2, display: 'flex', flexDirection: 'column', gap: '20px', minWidth: '340px' }}>
-              
-              {/* 1. Spatial Floor Map (2D MTMC View) */}
-              <div style={{ background: 'white', borderRadius: '12px', padding: '16px', border: '1px solid #e2e8f0', boxShadow: '0 1px 3px rgba(0,0,0,0.05)' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontWeight: 600, color: '#1e293b', fontSize: '14px' }}>
-                    <Layers size={18} color="#3b82f6" /> 2D Floor Plan Tracker
-                  </div>
-                  <span style={{ fontSize: '11px', background: '#eff6ff', color: '#2563eb', padding: '2px 8px', borderRadius: '4px', fontWeight: 600 }}>
-                    Homography 2D
-                  </span>
-                </div>
-                
-                {/* 2D Canvas Floor Representation */}
-                <div style={{ position: 'relative', width: '100%', height: '220px', background: '#0f172a', borderRadius: '8px', border: '1px solid #334155', overflow: 'hidden' }}>
-                  {/* Grid Lines */}
-                  <svg width="100%" height="100%" style={{ position: 'absolute', top: 0, left: 0, opacity: 0.2 }}>
-                    <defs>
-                      <pattern id="grid" width="30" height="30" patternUnits="userSpaceOnUse">
-                        <path d="M 30 0 L 0 0 0 30" fill="none" stroke="#94a3b8" strokeWidth="1" />
-                      </pattern>
-                    </defs>
-                    <rect width="100%" height="100%" fill="url(#grid)" />
-                  </svg>
+            {/* Right: Side Panel */}
+            <div style={{ flex: 1.2, display: 'flex', flexDirection: 'column', gap: '16px', minWidth: '320px' }}>
 
-                  {/* Camera Field of View Markers */}
-                  {cameras.map((c, idx) => (
-                    <div key={c.id} style={{ position: 'absolute', top: `${20 + idx * 25}%`, left: `${15 + idx * 25}%`, fontSize: '10px', color: '#64748b', display: 'flex', alignItems: 'center', gap: '4px' }}>
-                      <Radio size={12} color="#3b82f6" /> {c.name.slice(0, 10)}
+              {/* SINGLE CAMERA: ROI Bay Status */}
+              {activeTab !== 'all' ? (
+                <div style={{
+                  background: C.surface,
+                  borderRadius: '12px', padding: '20px',
+                  border: `1px solid ${C.border}`,
+                  display: 'flex', flexDirection: 'column', gap: '16px'
+                }}>
+                  <div style={{
+                    display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                    borderBottom: `1px solid ${C.border}`, paddingBottom: '12px'
+                  }}>
+                    <div>
+                      <h3 style={{ margin: 0, fontSize: '15px', fontWeight: 700, color: C.textPrimary }}>
+                        Trạng Thái Ô Chứa Hàng
+                      </h3>
+                      <p style={{ margin: '4px 0 0 0', fontSize: '12px', color: C.textMuted }}>
+                        Camera: <b style={{ color: C.accentGlow }}>{cameras.find(c => c.id === activeTab)?.name || activeTab}</b>
+                      </p>
                     </div>
-                  ))}
-
-                  {/* Real-time Global Target Dots */}
-                  {globalTrackList.map(t => (
-                    <div
-                      key={t.id}
-                      style={{
-                        position: 'absolute',
-                        left: `${t.fx * 100}%`,
-                        top: `${t.fy * 100}%`,
-                        transform: 'translate(-50%, -50%)',
-                        display: 'flex',
-                        flexDirection: 'column',
-                        alignItems: 'center',
-                        transition: 'all 0.15s ease-out'
-                      }}
-                    >
-                      <span style={{ width: '12px', height: '12px', borderRadius: '50%', background: '#ef4444', border: '2px solid #ffffff', boxShadow: '0 0 10px #ef4444' }}></span>
-                      <span style={{ fontSize: '10px', fontWeight: 'bold', color: '#ffffff', background: 'rgba(15,23,42,0.85)', padding: '1px 4px', borderRadius: '3px', marginTop: '2px' }}>
-                        #{t.id}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              {/* 2. Live Behavior Alerts Feed */}
-              <div style={{ background: 'white', borderRadius: '12px', padding: '16px', border: '1px solid #e2e8f0', boxShadow: '0 1px 3px rgba(0,0,0,0.05)', flex: 1, display: 'flex', flexDirection: 'column' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontWeight: 600, color: '#1e293b', fontSize: '14px' }}>
-                    <ShieldAlert size={18} color="#ef4444" /> Live Behavior Alarms
+                    <span style={{
+                      fontSize: '10px', background: 'rgba(99,102,241,0.12)',
+                      color: C.accentGlow, padding: '3px 8px', borderRadius: '5px',
+                      fontWeight: 600, fontFamily: 'monospace',
+                      border: '1px solid rgba(99,102,241,0.25)'
+                    }}>
+                      REAL-TIME
+                    </span>
                   </div>
-                  <span style={{ fontSize: '11px', color: '#64748b' }}>PostgreSQL Sync</span>
-                </div>
 
-                <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '8px', maxHeight: '280px' }}>
-                  {liveAlerts.length === 0 ? (
-                    <div style={{ padding: '24px', textAlign: 'center', color: '#94a3b8', fontSize: '13px' }}>
-                      Chưa phát hiện sự kiện bất thường
+                  {(!cameraRois[activeTab] || cameraRois[activeTab].length === 0) ? (
+                    <div style={{
+                      padding: '32px 20px', textAlign: 'center',
+                      color: C.textMuted, fontSize: '13px',
+                      background: C.card, borderRadius: '10px',
+                      border: `1px dashed ${C.border}`
+                    }}>
+                      <p style={{ margin: '0 0 6px 0', fontSize: '14px', fontWeight: 600, color: C.textSecondary }}>Chưa có vùng ROI nào</p>
+                      Chuyển sang tab <b style={{ color: C.accentGlow }}>Building</b> &rarr; <b>Cấu hình Phân tích Hành vi</b> để vẽ vùng ô chứa hàng.
                     </div>
                   ) : (
-                    liveAlerts.map((ev, i) => (
-                      <div
-                        key={i}
-                        style={{
-                          padding: '10px 12px',
-                          borderRadius: '8px',
-                          background: ev.rule_type === 'intrusion' ? '#fef2f2' : ev.rule_type === 'tripwire' ? '#f0fdf4' : '#fffbeb',
-                          border: `1px solid ${ev.rule_type === 'intrusion' ? '#fecaca' : ev.rule_type === 'tripwire' ? '#bbf7d0' : '#fde68a'}`,
-                          fontSize: '12px'
-                        }}
-                      >
-                        <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 600, marginBottom: '2px', color: '#1e293b' }}>
-                          <span style={{ textTransform: 'uppercase', fontSize: '11px', color: ev.rule_type === 'intrusion' ? '#dc2626' : ev.rule_type === 'tripwire' ? '#16a34a' : '#d97706' }}>
-                            {ev.rule_type}
-                          </span>
-                          <span style={{ color: '#64748b', fontSize: '10px' }}>{new Date(ev.timestamp).toLocaleTimeString()}</span>
-                        </div>
-                        <p style={{ margin: 0, color: '#334155' }}>{ev.description}</p>
-                      </div>
-                    ))
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                      {cameraRois[activeTab].map(r => {
+                        const isCarFull = (r.status as string) === 'CARFULL' || r.status === 'OCCUPIED';
+                        return (
+                          <div
+                            key={r.roi_id}
+                            style={{
+                              padding: '16px',
+                              borderRadius: '10px',
+                              background: isCarFull
+                                ? 'rgba(244, 63, 94, 0.08)'
+                                : 'rgba(34, 211, 238, 0.06)',
+                              border: `1px solid ${isCarFull ? 'rgba(244,63,94,0.35)' : 'rgba(34,211,238,0.25)'}`,
+                              boxShadow: isCarFull
+                                ? '0 0 20px rgba(244,63,94,0.12)'
+                                : '0 0 20px rgba(34,211,238,0.08)',
+                              display: 'flex', flexDirection: 'column', gap: '10px',
+                              transition: 'all 0.3s ease'
+                            }}
+                          >
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                              <span style={{ fontWeight: 700, fontSize: '13px', color: C.textPrimary, fontFamily: 'monospace', letterSpacing: '0.05em' }}>
+                                VỊ TRÍ · {r.name}
+                              </span>
+                            </div>
+
+                            {/* Status Badge */}
+                            <div style={{
+                              display: 'flex', alignItems: 'center', justifyContent: 'center',
+                              padding: '10px 16px', borderRadius: '8px',
+                              background: isCarFull ? 'rgba(244,63,94,0.18)' : 'rgba(34,211,238,0.12)',
+                              color: isCarFull ? '#fb7185' : '#67e8f9',
+                              fontWeight: 700, fontSize: '14px',
+                              letterSpacing: '0.08em', fontFamily: 'monospace',
+                              border: `1px solid ${isCarFull ? 'rgba(244,63,94,0.4)' : 'rgba(34,211,238,0.3)'}`,
+                              textShadow: isCarFull ? '0 0 12px rgba(244,63,94,0.5)' : '0 0 12px rgba(34,211,238,0.5)'
+                            }}>
+                              {isCarFull ? '⚠ CÓ HÀNG — CARFULL' : '◎ TRỐNG — EMPTY'}
+                            </div>
+
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '12px', color: C.textMuted }}>
+                              <span>{isCarFull ? 'Chiếm dụng bởi:' : 'Tình trạng:'}</span>
+                              <span style={{ fontWeight: 600, color: isCarFull ? '#fb7185' : '#67e8f9', fontFamily: 'monospace' }}>
+                                {isCarFull
+                                  ? (r.occupant_ids && r.occupant_ids.length > 0 ? r.occupant_ids.map(id => `#${id}`).join(', ') : 'Có vật thể / xe')
+                                  : 'Sẵn sàng tiếp nhận'}
+                              </span>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
                   )}
                 </div>
-              </div>
+              ) : (
+                /* ALL CAMERAS: Floor Map + Alerts */
+                <>
+                  {/* 2D Floor Plan */}
+                  <div style={{
+                    background: C.surface, borderRadius: '12px', padding: '14px',
+                    border: `1px solid ${C.border}`
+                  }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '7px', fontWeight: 600, color: C.textPrimary, fontSize: '13px' }}>
+                        <Layers size={16} color={C.accent} /> 2D Floor Plan Tracker
+                      </div>
+                      <span style={{
+                        fontSize: '10px', background: 'rgba(99,102,241,0.12)', color: C.accentGlow,
+                        padding: '2px 7px', borderRadius: '4px', fontWeight: 600, fontFamily: 'monospace',
+                        border: '1px solid rgba(99,102,241,0.25)'
+                      }}>
+                        HOMOGRAPHY
+                      </span>
+                    </div>
+                    {/* 2D SVG Map */}
+                    <div style={{
+                      position: 'relative', width: '100%', height: '260px',
+                      background: isDark ? '#09090b' : '#f1f5f9', borderRadius: '8px',
+                      border: `1px solid ${C.border}`, overflow: 'hidden'
+                    }}>
+                      {(() => {
+                        let minX = -3, minY = -3, maxX = 25, maxY = 12;
+                        const allPoints: number[][] = [[0, 0], [18, 0], [18, 8], [0, 8]];
+
+                        if (mapOverview && mapOverview.length > 0) {
+                          mapOverview.forEach(m => {
+                            const cal = m.calibration;
+                            if (cal) {
+                              if (cal.cam_x !== undefined) allPoints.push([cal.cam_x, cal.cam_y || 0]);
+                              if (cal.fov_polygon && Array.isArray(cal.fov_polygon)) {
+                                allPoints.push(...cal.fov_polygon);
+                              }
+                            }
+                          });
+                        }
+
+                        cameras.forEach(c => {
+                          if (c.cam_x !== undefined && c.cam_x !== null) {
+                            allPoints.push([c.cam_x, c.cam_y || 0]);
+                          }
+                        });
+
+                        floorTracks.forEach(t => {
+                          if (t.curFx !== undefined && t.curFy !== undefined) {
+                            allPoints.push([t.curFx, t.curFy]);
+                          }
+                        });
+
+                        if (allPoints.length > 0) {
+                          const xs = allPoints.map(p => p[0]);
+                          const ys = allPoints.map(p => p[1]);
+                          minX = Math.min(-3, ...xs) - 2;
+                          minY = Math.min(-3, ...ys) - 2;
+                          maxX = Math.max(22, ...xs) + 3;
+                          maxY = Math.max(10, ...ys) + 3;
+                        }
+
+                        const width = Math.max(10, maxX - minX);
+                        const height = Math.max(10, maxY - minY);
+                        const vBox = `${minX} ${minY} ${width} ${height}`;
+
+                        return (
+                          <svg viewBox={vBox} style={{ width: '100%', height: '100%', display: 'block' }}>
+                            <defs>
+                              <pattern id="monSmallGrid" width="1" height="1" patternUnits="userSpaceOnUse">
+                                <path d="M 1 0 L 0 0 0 1" fill="none" stroke={isDark ? "#1a1a22" : "#e2e8f0"} strokeWidth="0.05" />
+                              </pattern>
+                              <pattern id="monGrid" width="5" height="5" patternUnits="userSpaceOnUse">
+                                <rect width="5" height="5" fill="url(#monSmallGrid)" />
+                                <path d="M 5 0 L 0 0 0 5" fill="none" stroke={isDark ? "#2a2a38" : "#cbd5e1"} strokeWidth="0.1" />
+                              </pattern>
+                            </defs>
+                            <rect x={minX} y={minY} width={width} height={height} fill="url(#monGrid)" />
+
+                            {/* Axes */}
+                            <line x1={minX} y1={0} x2={maxX} y2={0} stroke="rgba(244,63,94,0.4)" strokeWidth="0.12" strokeDasharray="0.6 0.6" />
+                            <line x1={0} y1={minY} x2={0} y2={maxY} stroke="rgba(6,182,212,0.4)" strokeWidth="0.12" strokeDasharray="0.6 0.6" />
+
+                            {/* Area boundary */}
+                            <rect x={0} y={0} width={18} height={8} fill="rgba(99,102,241,0.06)" stroke="#6366f1" strokeWidth="0.1" strokeDasharray="0.5 0.5" />
+                            <text x={9} y={-0.5} fontSize="0.7" fill={isDark ? "#52525b" : "#64748b"} textAnchor="middle" fontWeight="bold">18m (Trục X)</text>
+                            <text x={-0.6} y={4} fontSize="0.7" fill={isDark ? "#52525b" : "#64748b"} textAnchor="middle" fontWeight="bold" transform="rotate(-90 -0.6 4)">8m (Y)</text>
+
+                            {/* FOV Polygons */}
+                            {mapOverview.map(cam => {
+                              const cal = cam.calibration;
+                              if (!cal || !cal.fov_polygon || !Array.isArray(cal.fov_polygon)) return null;
+                              return (
+                                <polygon
+                                  key={`fov-${cam.cam_id}`}
+                                  points={cal.fov_polygon.map((p: any) => `${p[0]},${p[1]}`).join(' ')}
+                                  fill="rgba(99,102,241,0.08)"
+                                  stroke="#6366f1"
+                                  strokeWidth="0.08"
+                                />
+                              );
+                            })}
+
+                            {/* Camera Pins */}
+                            {cameras.map(c => {
+                              const camCal = mapOverview.find(m => m.cam_id === c.id)?.calibration;
+                              const cx = c.cam_x ?? camCal?.cam_x ?? 0;
+                              const cy = c.cam_y ?? camCal?.cam_y ?? 0;
+                              return (
+                                <g key={c.id} transform={`translate(${cx}, ${cy})`}>
+                                  <circle cx={0} cy={0} r="0.6" fill="none" stroke="#22d3ee" strokeWidth="0.1" opacity="0.5" />
+                                  <circle cx={0} cy={0} r="0.35" fill="#22d3ee" stroke="#09090b" strokeWidth="0.12" />
+                                  <rect x={0.7} y={-0.45} width={c.name.length * 0.48 + 3.5} height={0.85} rx={0.15} fill="rgba(9,9,11,0.88)" stroke="#2a2a38" strokeWidth="0.05" />
+                                  <text x={0.9} y={0.08} fontSize="0.5" fill="#22d3ee" fontWeight="bold">
+                                    {c.name} ({cx}m, {cy}m)
+                                  </text>
+                                </g>
+                              );
+                            })}
+
+                            {/* Real-time Tracks */}
+                            {floorTracks.map(t => {
+                              const rawClass = (t.class || '').toLowerCase();
+                              const isRobot = rawClass.includes('robot');
+                              const color = isRobot ? '#f43f5e' : '#6366f1';
+                              const displayClass = isRobot ? 'delivery-robot' : (rawClass.includes('rack') ? 'rack' : (t.class || 'Object'));
+                              const label = `${displayClass} #${t.id} (${t.curFx.toFixed(1)}m, ${t.curFy.toFixed(1)}m)`;
+
+                              return (
+                                <g key={`track-${t.id}`} transform={`translate(${t.curFx}, ${t.curFy})`}>
+                                  <circle cx={0} cy={0} r="1.0" fill="none" stroke={color} strokeWidth="0.08" opacity={0.5}>
+                                    <animate attributeName="r" values="0.5;1.3;0.5" dur="1.8s" repeatCount="indefinite" />
+                                    <animate attributeName="opacity" values="0.7;0.1;0.7" dur="1.8s" repeatCount="indefinite" />
+                                  </circle>
+                                  <circle cx={0} cy={0} r="0.45" fill={color} stroke="#09090b" strokeWidth="0.1" />
+                                  <rect x={0.7} y={-0.55} width={label.length * 0.4 + 0.4} height={0.9} rx={0.15} fill="rgba(9,9,11,0.9)" stroke={color} strokeWidth="0.06" />
+                                  <text x={0.9} y={0.05} fontSize="0.5" fill="#f4f4f5" fontWeight="bold">
+                                    {label}
+                                  </text>
+                                </g>
+                              );
+                            })}
+                          </svg>
+                        );
+                      })()}
+                    </div>
+                  </div>
+
+                  {/* Live Alerts Feed */}
+                  <div style={{
+                    background: C.surface, borderRadius: '12px', padding: '14px',
+                    border: `1px solid ${C.border}`,
+                    flex: 1, display: 'flex', flexDirection: 'column'
+                  }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '7px', fontWeight: 600, color: C.textPrimary, fontSize: '13px' }}>
+                        <ShieldAlert size={16} color={C.rose} /> Live Behavior Alarms
+                      </div>
+                      <span style={{ fontSize: '10px', color: C.textMuted, fontFamily: 'monospace' }}>PostgreSQL Sync</span>
+                    </div>
+
+                    <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '6px', maxHeight: '260px' }}>
+                      {liveAlerts.length === 0 ? (
+                        <div style={{ padding: '24px', textAlign: 'center', color: C.textMuted, fontSize: '12px' }}>
+                          Chưa phát hiện sự kiện bất thường
+                        </div>
+                      ) : (
+                        liveAlerts.map((ev, i) => {
+                          const isIntrusion = ev.rule_type === 'intrusion';
+                          const isTripwire = ev.rule_type === 'tripwire';
+                          const accentColor = isIntrusion ? C.rose : isTripwire ? C.cyan : C.orange;
+                          return (
+                            <div
+                              key={i}
+                              style={{
+                                padding: '9px 12px 9px 14px',
+                                borderRadius: '7px',
+                                background: C.card,
+                                border: `1px solid ${C.border}`,
+                                borderLeft: `3px solid ${accentColor}`,
+                                fontSize: '12px'
+                              }}
+                            >
+                              <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 600, marginBottom: '3px' }}>
+                                <span style={{ textTransform: 'uppercase', fontSize: '10px', color: accentColor, fontFamily: 'monospace', letterSpacing: '0.08em' }}>
+                                  {ev.rule_type}
+                                </span>
+                                <span style={{ color: C.textMuted, fontSize: '10px', fontFamily: 'monospace' }}>
+                                  {new Date(ev.timestamp).toLocaleTimeString()}
+                                </span>
+                              </div>
+                              <p style={{ margin: 0, color: C.textSecondary, lineHeight: 1.4 }}>{ev.description}</p>
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                  </div>
+                </>
+              )}
 
             </div>
           </>
