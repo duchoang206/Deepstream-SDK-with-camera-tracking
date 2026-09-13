@@ -1,8 +1,34 @@
+# Node & Next.js
 node_modules/
 .next/
+*.tsbuildinfo
+
+# Python & Caching
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+venv/
+.venv/
+
+# Environment Variables & Secrets
 .env
 .env.local
+.env.*.local
+
+# Logs, Core Dumps & Diagnostics
 *.log
 core.*
+
+# Large Media, Models & Binary Artifacts
+*.mp4
+*.tar.gz
+*.pt
+*.engine
+*.so
+*.o
+*.sqlite3
+
+# External & Sub-project Directories
+ARM-Robot-map-Vision-3D/
