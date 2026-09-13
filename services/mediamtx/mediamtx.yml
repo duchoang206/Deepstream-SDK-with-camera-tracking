@@ -1,35 +1,50 @@
-# MediaMTX Configuration for RTC VMS (R-SkyView) - Ultra-Low-Latency WebRTC/WHEP Gateway
+# MediaMTX Configuration for RTC VMS - Ultra-Low-Latency WebRTC / WHEP Gateway
+# Configured for synchronous 4-camera ingestion and sub-100ms browser playback
+
+# RTSP Server & Ingestion
 rtsp: yes
 rtspAddress: :8554
+rtspTimeout: 10s
+readTimeout: 10s
+writeTimeout: 10s
+readBufferCount: 8192
+writeQueueSize: 2048
 
+# Protocols
 rtmp: no
 hls: no
 srt: no
 
+# REST Control API
 api: yes
 apiAddress: :9997
 
+# WebRTC & WHEP Gateway
 webrtc: yes
 webrtcAddress: :8081
 webrtcICEUDPMuxAddress: :18189
 webrtcICETCPMuxAddress: :18189
-readBufferCount: 4096
+webrtcAllowStreamOverride: yes
 
 paths:
-  8c69ed32:
+  # Primary 4 Camera Streams
+  cam0:
     source: rtsp://admin:rtc%402025@192.168.5.201:554/cam/realmonitor?channel=1&subtype=0
     sourceOnDemand: no
     rtspTransport: tcp
-  cam_241:
+  cam1:
     source: rtsp://admin:rtc%401234@192.168.5.241:554/Streaming/Channels/101
     sourceOnDemand: no
     rtspTransport: tcp
-  cam_242:
+  cam2:
     source: rtsp://admin:rtc%401234@192.168.5.242:554/Streaming/Channels/101
     sourceOnDemand: no
     rtspTransport: tcp
-  cam_240:
+  cam3:
     source: rtsp://admin:rtc%401234@192.168.5.240:554/Streaming/Channels/101
     sourceOnDemand: no
     rtspTransport: tcp
+
+  # Legacy & Dynamic Stream Fallback
   all_others:
+    source: publisher
