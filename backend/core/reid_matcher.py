@@ -135,8 +135,15 @@ class GlobalReIDMatcher:
             num_cands = len(candidate_gids)
             cost_matrix = np.ones((num_dets, num_cands), dtype=np.float32) * 10.0
             
+            # Vectorized feature and spatial matrix extraction
+            det_coords = np.array([[d["floor_x"], d["floor_y"]] for d in unmatched_dets], dtype=np.float32)
+            cand_coords = np.array([self.gallery[gid].floor_pos for gid in candidate_gids], dtype=np.float32)
+            
+            # Pairwise spatial Euclidean distance in metric space: (num_dets, num_cands)
+            diff = det_coords[:, np.newaxis, :] - cand_coords[np.newaxis, :, :]
+            spatial_dists = np.hypot(diff[:, :, 0], diff[:, :, 1])
+
             for i, det in enumerate(unmatched_dets):
-                det_fx, det_fy = det["floor_x"], det["floor_y"]
                 det_class = det.get("class", "")
                 det_feat = det.get("feature")
                 if det_feat is not None:
@@ -150,8 +157,7 @@ class GlobalReIDMatcher:
                         continue
 
                     # Spatial Distance on Metric Floor Plan (Meters)
-                    track_fx, track_fy = track.floor_pos
-                    floor_dist = np.hypot(det_fx - track_fx, det_fy - track_fy)
+                    floor_dist = spatial_dists[i, j]
                     
                     # Visual Appearance Distance
                     visual_dist = 1.0

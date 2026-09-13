@@ -204,6 +204,47 @@ class BehaviorAnalyticsEngine:
                         filter_state["status"] = "EMPTY"
                         filter_state["occupant_ids"] = []
 
+                # --- 1.2 DWELL TIME & LOITERING EVALUATION ---
+                if rule_type == "dwell_time" and poly is not None:
+                    dwell_limit = float(rule.get("dwell_limit", 10.0))  # seconds
+                    for oid in raw_occupant_ids:
+                        dwell_key = (cam_id, rule_id, oid)
+                        if dwell_key not in self.zone_occupancy:
+                            self.zone_occupancy[dwell_key] = now
+                        else:
+                            time_in_zone = now - self.zone_occupancy[dwell_key]
+                            if time_in_zone >= dwell_limit:
+                                cd_key = (cam_id, rule_id, oid)
+                                if now - self.alert_cooldowns.get(cd_key, 0) > 10.0:
+                                    self.alert_cooldowns[cd_key] = now
+                                    triggered_events.append({
+                                        "cam_id": cam_id,
+                                        "global_id": oid,
+                                        "rule_id": rule_id,
+                                        "rule_type": "dwell_time",
+                                        "severity": "warning",
+                                        "description": f"⏳ Cảnh báo đứng lâu (Loitering): Đối tượng #{oid} đã ở trong vùng '{rule['name']}' hơn {int(time_in_zone)}s",
+                                        "timestamp": int(now * 1000)
+                                    })
+
+                # --- 1.3 CROWD DENSITY ANOMALY EVALUATION ---
+                if rule_type == "density" and poly is not None:
+                    max_allowed = int(rule.get("max_objects", 3))
+                    curr_count = len(raw_occupant_ids)
+                    if curr_count > max_allowed:
+                        cd_key = (cam_id, rule_id, 0)
+                        if now - self.alert_cooldowns.get(cd_key, 0) > 5.0:
+                            self.alert_cooldowns[cd_key] = now
+                            triggered_events.append({
+                                "cam_id": cam_id,
+                                "global_id": 0,
+                                "rule_id": rule_id,
+                                "rule_type": "density",
+                                "severity": "critical",
+                                "description": f"👥 Cảnh báo tụ tập đám đông: Vùng '{rule['name']}' vượt ngưỡng mật độ ({curr_count}/{max_allowed} đối tượng)",
+                                "timestamp": int(now * 1000)
+                            })
+
                 roi_states.append({
                     "roi_id": rule_id,
                     "name": rule["name"],

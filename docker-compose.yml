@@ -2,23 +2,37 @@ services:
   db:
     image: postgres:15-alpine
     container_name: yolo_analytics_db
-    restart: always
+    restart: unless-stopped
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: analytics
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-analytics}
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d analytics"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   backend:
     build:
       context: ./backend
       dockerfile: Dockerfile
     container_name: yolo_deepstream_backend
-    restart: always
+    restart: unless-stopped
     network_mode: host
+    depends_on:
+      db:
+        condition: service_healthy
     deploy:
       resources:
         reservations:
@@ -31,27 +45,42 @@ services:
       - ./backend:/app
     environment:
       - PYTHONUNBUFFERED=1
-      - DISPLAY=$DISPLAY
+      - DISPLAY=${DISPLAY:-:0}
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=all
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
 
   mediamtx:
     image: bluenviron/mediamtx:latest
     container_name: yolo_mediamtx
-    restart: always
+    restart: unless-stopped
     network_mode: host
     volumes:
       - ./services/mediamtx/mediamtx.yml:/mediamtx.yml
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   frontend:
     image: node:20-alpine
     container_name: yolo_frontend
-    restart: always
+    restart: unless-stopped
     network_mode: host
     working_dir: /app
     volumes:
       - ./web-dashboard:/app
     command: sh -c "npm install && npm run dev"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   postgres_data:

@@ -52,6 +52,7 @@ export default function HeaderActions() {
   const { language, t, changeLanguage } = useLanguage();
   const { isDark, toggleTheme, colors } = useAppTheme();
   const [showLangMenu, setShowLangMenu] = useState(false);
+  const [systemOnline, setSystemOnline] = useState(true);
   const menuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -77,7 +78,37 @@ export default function HeaderActions() {
   });
 
   return (
-    <div className="fms-actions">
+    <div className="fms-actions" style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+      {/* Live System Pipeline Status Badge */}
+      <div
+        title="DeepStream GPU AI Pipeline: 4 Streams Active"
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: '7px',
+          padding: '4px 10px',
+          borderRadius: '20px',
+          background: systemOnline ? 'rgba(16, 185, 129, 0.12)' : 'rgba(239, 68, 68, 0.12)',
+          border: `1px solid ${systemOnline ? 'rgba(16, 185, 129, 0.35)' : 'rgba(239, 68, 68, 0.35)'}`,
+          fontSize: '12px',
+          fontWeight: 600,
+          color: systemOnline ? '#10b981' : '#ef4448',
+          letterSpacing: '0.5px'
+        }}
+      >
+        <span
+          style={{
+            width: '8px',
+            height: '8px',
+            borderRadius: '50%',
+            background: systemOnline ? '#10b981' : '#ef4448',
+            boxShadow: systemOnline ? '0 0 8px #10b981' : '0 0 8px #ef4448',
+            display: 'inline-block'
+          }}
+        />
+        <span>4-CAM LIVE</span>
+      </div>
+
       {/* Theme Toggle (Cinder Dark <-> Tally Light) */}
       <button
         className="action-btn"

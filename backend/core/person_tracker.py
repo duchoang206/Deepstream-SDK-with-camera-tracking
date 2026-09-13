@@ -20,14 +20,16 @@ YOLO = None
 
 class SimpleTracker:
     """
-    Simple IOU-based tracker (SORT-lite) to assign consistent person IDs per camera.
-    No external dependency required.
+    Simple IOU-based tracker (SORT-lite) with EMA bounding-box smoothing
+    and velocity estimation to assign consistent person IDs per camera.
     """
-    def __init__(self, max_age: int = 15, min_iou: float = 0.25):
+    def __init__(self, max_age: int = 15, min_iou: float = 0.25, smoothing_weight: float = 0.70):
         self.next_id = 1
-        self.tracks: Dict[int, dict] = {}  # id -> {bbox, age, missed}
+        # id -> {bbox, age, missed, last_time, last_centroid, vx, vy}
+        self.tracks: Dict[int, dict] = {}
         self.max_age = max_age
         self.min_iou = min_iou
+        self.smoothing_weight = smoothing_weight
 
     def _iou(self, b1, b2):
         x1 = max(b1[0], b2[0]); y1 = max(b1[1], b2[1])
@@ -41,8 +43,9 @@ class SimpleTracker:
     def update(self, detections: List[List[float]]) -> List[dict]:
         """
         detections: list of [x1, y1, x2, y2] normalized 0..1
-        Returns list of {id, x, y, w, h} matched tracks
+        Returns list of {id, x, y, w, h, floor_x, floor_y, vx, vy, speed} matched tracks
         """
+        now = time.time()
         # Age all existing tracks
         for tid in list(self.tracks.keys()):
             self.tracks[tid]["missed"] += 1
@@ -64,17 +67,51 @@ class SimpleTracker:
                     best_iou = iou
                     best_tid = tid
 
+            cx = (det[0] + det[2]) / 2.0
+            cy = det[3]
+
             if best_tid is not None:
-                self.tracks[best_tid]["bbox"] = det
+                prev = self.tracks[best_tid]
+                dt = max(1e-3, now - prev.get("last_time", now))
+                prev_c = prev.get("last_centroid", (cx, cy))
+                vx = (cx - prev_c[0]) / dt
+                vy = (cy - prev_c[1]) / dt
+
+                # Exponential smoothing on bounding box
+                w = self.smoothing_weight
+                smoothed_bbox = [
+                    w * prev["bbox"][0] + (1.0 - w) * det[0],
+                    w * prev["bbox"][1] + (1.0 - w) * det[1],
+                    w * prev["bbox"][2] + (1.0 - w) * det[2],
+                    w * prev["bbox"][3] + (1.0 - w) * det[3],
+                ]
+
+                self.tracks[best_tid]["bbox"] = smoothed_bbox
                 self.tracks[best_tid]["missed"] = 0
+                self.tracks[best_tid]["last_time"] = now
+                self.tracks[best_tid]["last_centroid"] = (cx, cy)
+                self.tracks[best_tid]["vx"] = vx
+                self.tracks[best_tid]["vy"] = vy
                 matched_ids.add(best_tid)
                 tid = best_tid
+                det_to_use = smoothed_bbox
             else:
                 tid = self.next_id
                 self.next_id += 1
-                self.tracks[tid] = {"bbox": det, "missed": 0}
+                self.tracks[tid] = {
+                    "bbox": det,
+                    "missed": 0,
+                    "last_time": now,
+                    "last_centroid": (cx, cy),
+                    "vx": 0.0,
+                    "vy": 0.0
+                }
+                det_to_use = det
+                vx, vy = 0.0, 0.0
 
-            x1, y1, x2, y2 = det
+            x1, y1, x2, y2 = det_to_use
+            speed = float(np.hypot(vx, vy))
+
             results.append({
                 "id": tid,
                 "x": round(x1, 4),
@@ -83,6 +120,9 @@ class SimpleTracker:
                 "h": round(y2 - y1, 4),
                 "floor_x": round((x1 + x2) / 2, 4),
                 "floor_y": round(y2, 4),
+                "vx": round(float(vx), 3),
+                "vy": round(float(vy), 3),
+                "speed": round(speed, 3),
                 "class": "person",
                 "confidence": 0.85
             })
